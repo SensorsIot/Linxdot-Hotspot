@@ -262,6 +262,57 @@ root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro rootflags=noload console=ttyS2,1
 - `Docs/01-02-_2026_21-17-08.png` - 3.5mm audio jack pin diagram
 - `Docs/01-02-_2026_21-17-19.png` - 3.5mm audio jack PCB layout
 
+## Firmware Image
+
+The firmware image `Images/crankkos-linxdotrk3566-1.0.0.img.xz` is not built from source. It is a modified
+version of the original CrankkOS base image.
+
+### Base Image
+
+Downloaded from the Crankk CDN:
+
+```
+https://crkk1.spaces.crankk.net/crankkos-linxdotrk3566-1.0.0.img.xz
+```
+
+CrankkOS is a Buildroot-based Linux distribution created by
+[Calin Crisan](https://github.com/ccrisan) (known for
+[motionEyeOS](https://github.com/motioneye-project/motioneyeos)).
+It uses the same architecture: read-only rootfs with overlayfs on a data partition,
+BusyBox init, Dropbear SSH, and Docker.
+
+### Modifications
+
+The image was mounted on a Linux host using loop devices and modified in-place:
+
+```bash
+losetup --find --show --partscan crankkos-linxdotrk3566-1.0.0.img
+mount /dev/loop0p2 /mnt    # partition 2 = rootfs
+```
+
+The following files were changed:
+
+| File | Change | Reason |
+|------|--------|--------|
+| `/etc/docker-compose.yml` | Replaced Crankk containers with Helium packet forwarder (`sx1302_hal`) and gateway miner (`helium_gateway`) | Original Crankk services are defunct (Kadena blockchain shutdown) |
+| `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot` | Added SX1302 LDO reset script | Required by packet forwarder to initialize the LoRa concentrator |
+| `/usr/share/dataskel/etc/shadow` | Set root password to `crankk` | CrankkOS templates overlay passwords from dataskel |
+| `/etc/crontabs/root` | Removed Crankk-specific cron jobs, kept logrotate | Clean up unused scheduled tasks |
+| `/etc/inittab` | Changed getty baud from `115200` to `1500000` | Must match kernel console baud rate, otherwise no login prompt on serial |
+| `/etc/init.d/S40network` | Replaced `mii-tool` with `/sys/class/net/eth0/carrier` checks; increased link timeout from 10s to 30s | RTL8211F PHY on DWMAC4/5 does not support legacy MII interface |
+
+After modification:
+
+```bash
+umount /mnt
+losetup -d /dev/loop0
+xz -9 crankkos-linxdotrk3566-1.0.0.img
+```
+
+The resulting file keeps the original filename but contains the fixes above.
+The uncompressed image is a raw disk image (3 partitions) written directly to
+eMMC via `rkdeveloptool wl 0`. See `Docs/Flashing.md` for the full procedure.
+
 ## References
 
 - [Linxdot MinimalDocker](https://github.com/metrafonic/Linxdot-MinimalDocker) - Flashing tools and base image
