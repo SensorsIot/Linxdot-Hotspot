@@ -45,10 +45,11 @@ jobs:
 
       - name: Download and extract Buildroot
         run: |
-          if [ ! -d buildroot ]; then
+          if [ ! -f buildroot/Makefile ]; then
             wget -q "https://buildroot.org/downloads/buildroot-${BUILDROOT_VERSION}.tar.xz"
             tar xf "buildroot-${BUILDROOT_VERSION}.tar.xz"
-            mv "buildroot-${BUILDROOT_VERSION}" buildroot
+            rsync -a "buildroot-${BUILDROOT_VERSION}/" buildroot/
+            rm -rf "buildroot-${BUILDROOT_VERSION}"
           fi
 
       - name: Configure Buildroot
