@@ -2,11 +2,86 @@
 
 ## Overview
 
-The Linxdot LD1001 is a LoRa hotspot built around the Rockchip RK3566 SoC. The board is mounted in a metal enclosure with a heatsink on the processor. It was originally designed for the Helium network and later adopted by the Crankk project.
+The Linxdot LD1001 is a LoRa hotspot built around the Rockchip RK3566 SoC. The board is mounted in a metal enclosure with a heatsink on the processor. Originally designed for the Helium network, it now runs a configurable Semtech UDP packet forwarder for TTN, ChirpStack, or any compatible LoRa network server.
 
 - **Device tree model:** `Linxdot RK3566 R01`
 - **Product name:** Linxdot LD1001
 - **Form factor:** Metal enclosure (~100x100mm) with passive heatsink
+
+## Gateway Configuration
+
+The device runs a single Docker container (`pktfwd`) with the Semtech UDP packet forwarder, preconfigured for TTN EU1.
+
+### Default Settings
+
+| Setting       | Default Value                     |
+|---------------|-----------------------------------|
+| `SERVER_HOST` | `eu1.cloud.thethings.network`     |
+| `SERVER_PORT` | `1700`                            |
+| `REGION`      | `EU868`                           |
+| `VENDOR`      | `linxdot`                         |
+
+### Gateway EUI
+
+The gateway EUI is derived from the SX1302 concentrator chip and is unique per device. It is logged on startup:
+
+```
+INFO: concentrator EUI: 0x0016c001f140b34d
+```
+
+Use this EUI (without the `0x` prefix) to register the gateway on TTN or ChirpStack.
+
+### Changing the Network Server
+
+SSH into the device and edit `/etc/docker-compose.yml`:
+
+```yaml
+environment:
+  VENDOR: linxdot
+  REGION: EU868
+  SERVER_HOST: eu1.cloud.thethings.network
+  SERVER_PORT: 1700
+```
+
+Replace `SERVER_HOST` and `SERVER_PORT` with your target server:
+
+| Network Server | `SERVER_HOST`                      | `SERVER_PORT` |
+|----------------|------------------------------------|---------------|
+| TTN EU1        | `eu1.cloud.thethings.network`      | `1700`        |
+| TTN US1        | `nam1.cloud.thethings.network`     | `1700`        |
+| TTN AU1        | `au1.cloud.thethings.network`      | `1700`        |
+| ChirpStack     | `<your-chirpstack-host>`           | `1700`        |
+
+Then restart the container:
+
+```bash
+cd /etc && docker compose restart pktfwd
+```
+
+### Changing the Region
+
+To use a different frequency plan, edit the `REGION` environment variable in `/etc/docker-compose.yml`. Supported values: `EU868`, `US915`, `AU915`, `AS923`, `KR920`, `IN865`, `CN470`, `RU864`.
+
+### How It Works
+
+On container startup, `setup_server.sh` runs before the packet forwarder and:
+
+1. Patches `server_address`, `serv_port_up`, and `serv_port_down` in all `global_conf.json` files to match `SERVER_HOST` and `SERVER_PORT`
+2. Resets the SX1302 concentrator via GPIO, then reads the hardware EUI using `chip_id` and patches `gateway_ID` to match
+
+The standard Semtech `lora_pkt_fwd` binary then starts and forwards packets via UDP.
+
+### Verifying Operation
+
+```bash
+docker logs -f pktfwd
+```
+
+You should see:
+1. `setup_server: configuring server_address=...` confirming the server was patched
+2. Concentrator initialization messages
+3. Periodic `PUSH_ACK` and `PULL_ACK` messages confirming connectivity to the server
+
 
 ## System on Chip
 
@@ -226,7 +301,7 @@ The USB-C port on the board is used for both flashing (Maskrom/Loader mode via R
 3. U-Boot loads kernel from mmcblk1p1
 4. Kernel mounts mmcblk1p2 as read-only rootfs
 5. Init (BusyBox) starts services, mounts overlays from mmcblk1p3
-6. Docker starts containers (pktfwd, miner)
+6. Docker starts `pktfwd` container (UDP packet forwarder for TTN/ChirpStack)
 
 ### Kernel Command Line
 
@@ -294,7 +369,8 @@ The following files were changed:
 
 | File | Change | Reason |
 |------|--------|--------|
-| `/etc/docker-compose.yml` | Replaced Crankk containers with Helium packet forwarder (`sx1302_hal`) and gateway miner (`helium_gateway`) | Original Crankk services are defunct (Kadena blockchain shutdown) |
+| `/etc/docker-compose.yml` | Single `pktfwd` container with configurable `SERVER_HOST`/`SERVER_PORT` for TTN/ChirpStack | Original Crankk/Helium services replaced with generic UDP packet forwarder |
+| `/opt/packet_forwarder/setup_server.sh` | Startup script patching server address, port, and gateway EUI | Makes forwarder configurable via environment variables |
 | `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot` | Added SX1302 LDO reset script | Required by packet forwarder to initialize the LoRa concentrator |
 | `/usr/share/dataskel/etc/shadow` | Set root password to `crankk` | CrankkOS templates overlay passwords from dataskel |
 | `/etc/crontabs/root` | Removed Crankk-specific cron jobs, kept logrotate | Clean up unused scheduled tasks |

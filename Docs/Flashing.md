@@ -8,7 +8,7 @@ The Linxdot LD1001 uses a Rockchip RK3566 SoC with 2GB RAM and 32GB eMMC. Flashi
 
 The image is based on CrankkOS 1.0.0 (a Buildroot system), modified to:
 
-- Replace the Crankk container with a Helium packet forwarder and gateway miner
+- Replace Crankk/Helium containers with a configurable UDP packet forwarder for TTN/ChirpStack
 - Fix ethernet link detection (replaced `mii-tool` with `/sys/class/net/carrier` check)
 - Fix serial console getty baud rate (1500000 to match kernel console)
 - Set a default root password
@@ -167,28 +167,24 @@ Reboot to apply.
 
 ### Docker Services
 
-Two containers run automatically:
+One container runs automatically:
 
 | Container | Image | Purpose |
 |-----------|-------|---------|
-| `pktfwd` | `ghcr.io/heliumdiy/sx1302_hal:sha-87d8931` | LoRa packet forwarder (SX1302) |
-| `miner` | `quay.io/team-helium/miner:gateway-latest` | Helium gateway miner |
+| `pktfwd` | `ghcr.io/heliumdiy/sx1302_hal:sha-87d8931` | LoRa UDP packet forwarder (SX1302) |
+
+The packet forwarder is preconfigured for TTN EU1 (`eu1.cloud.thethings.network:1700`). To change the network server, edit `/etc/docker-compose.yml` and update `SERVER_HOST` and `SERVER_PORT`.
 
 Check status:
 
 ```bash
 docker ps
-```
-
-Check Helium animal name:
-
-```bash
-docker exec miner helium_gateway key info
+docker logs pktfwd
 ```
 
 ### Region Configuration
 
-The default region is EU868. To change it, edit `/etc/docker-compose.yml` and update `REGION` and `GW_REGION` to your region (e.g., `US915`, `AU915`).
+The default region is EU868. To change it, edit `/etc/docker-compose.yml` and update `REGION` to your region (e.g., `US915`, `AU915`).
 
 ### Tailscale (Optional)
 
@@ -236,12 +232,13 @@ cd /etc && docker-compose up -d
 
 The image was built by modifying the base CrankkOS 1.0.0 image. The changes made:
 
-1. **`/etc/docker-compose.yml`** - Replaced Crankk container with Helium pktfwd + miner
-2. **`/opt/packet_forwarder/tools/reset_lgw.sh.linxdot`** - Added LDO reset script for SX1302
-3. **`/usr/share/dataskel/etc/shadow`** - Set root password to `crankk`
-4. **`/etc/crontabs/root`** - Cleaned up crontab (logrotate only)
-5. **`/etc/inittab`** - Fixed serial getty baud rate (115200 -> 1500000)
-6. **`/etc/init.d/S40network`** - Replaced `mii-tool` with `/sys/class/net/carrier` for link detection, increased link negotiation timeout
+1. **`/etc/docker-compose.yml`** - Single `pktfwd` container with configurable `SERVER_HOST`/`SERVER_PORT` (default: TTN EU1)
+2. **`/opt/packet_forwarder/setup_server.sh`** - Startup script that patches server address, port, and gateway EUI in config
+3. **`/opt/packet_forwarder/tools/reset_lgw.sh.linxdot`** - LDO reset script for SX1302
+4. **`/usr/share/dataskel/etc/shadow`** - Set root password to `crankk`
+5. **`/etc/crontabs/root`** - Cleaned up crontab (logrotate only)
+6. **`/etc/inittab`** - Fixed serial getty baud rate (115200 -> 1500000)
+7. **`/etc/init.d/S40network`** - Replaced `mii-tool` with `/sys/class/net/carrier` for link detection, increased link negotiation timeout
 
 ## Credits
 

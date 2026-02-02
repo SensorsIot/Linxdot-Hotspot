@@ -7,7 +7,7 @@
 ![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based on a modified CrankkOS image with bug fixes for ethernet link detection and serial console.
+Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based on a modified CrankkOS image. Runs a configurable Semtech UDP packet forwarder for **TTN**, **ChirpStack**, or any LoRa network server.
 
 ## :zap: Hardware
 
@@ -63,7 +63,7 @@ The firmware is based on the original CrankkOS image with these fixes:
 |-----|---------|
 | :white_check_mark: Ethernet link detection | `mii-tool` replaced with `/sys/class/net/carrier` (RTL8211F doesn't support MII) |
 | :white_check_mark: Serial console baud rate | Getty baud changed from 115200 to 1500000 to match kernel console |
-| :white_check_mark: Docker containers | Replaced defunct Crankk services with Helium packet forwarder + gateway miner |
+| :white_check_mark: Docker containers | Single UDP packet forwarder container, configurable for TTN/ChirpStack (replaced Crankk/Helium services) |
 | :white_check_mark: Root password | Set to `crankk` |
 | :white_check_mark: Crontab cleanup | Removed Crankk-specific jobs |
 
