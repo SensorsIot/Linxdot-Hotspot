@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_LINXDOT_PATH/package/docker-compose-v1/Config.in"

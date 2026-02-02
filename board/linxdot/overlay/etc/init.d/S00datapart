@@ -1,0 +1,67 @@
+#!/bin/sh
+#
+# S00datapart - Create, check, and mount the /data partition
+#
+
+DATA_DEV=""
+
+detect_data_dev() {
+    root_dev=$(cat /proc/cmdline | sed -n 's/.*root=\([^ ]*\).*/\1/p')
+    case "$root_dev" in
+        /dev/mmcblk*p*)
+            disk_dev="${root_dev%p*}"
+            DATA_DEV="${disk_dev}p3"
+            ;;
+        /dev/sd*[0-9])
+            disk_dev="${root_dev%[0-9]}"
+            DATA_DEV="${disk_dev}3"
+            ;;
+        *)
+            echo "S00datapart: cannot determine disk device from root=$root_dev"
+            return 1
+            ;;
+    esac
+}
+
+case "$1" in
+    start)
+        detect_data_dev || exit 1
+
+        if [ ! -b "$DATA_DEV" ]; then
+            echo "S00datapart: data partition $DATA_DEV not found, skipping"
+            exit 0
+        fi
+
+        echo "S00datapart: checking $DATA_DEV"
+        e2fsck -pf "$DATA_DEV" 2>/dev/null
+
+        # Resize on first boot (fast no-op if already full size)
+        echo "S00datapart: resizing $DATA_DEV"
+        resize2fs "$DATA_DEV" 2>/dev/null
+
+        echo "S00datapart: mounting $DATA_DEV on /data"
+        mkdir -p /data
+        mount -t ext4 -o noatime "$DATA_DEV" /data
+
+        # First boot: create skeleton directories
+        if [ ! -f /data/.initialized ]; then
+            echo "S00datapart: first boot — creating data skeleton"
+            mkdir -p /data/docker
+            mkdir -p /data/overlay/usr/upper /data/overlay/usr/work
+            mkdir -p /data/overlay/var_log/upper /data/overlay/var_log/work
+            mkdir -p /data/overlay/var_lib/upper /data/overlay/var_lib/work
+            mkdir -p /data/basicstation
+            mkdir -p /data/etc
+            touch /data/.initialized
+            sync
+        fi
+        ;;
+    stop)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
+
+exit 0

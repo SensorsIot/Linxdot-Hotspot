@@ -1,0 +1,81 @@
+name: Build LinxdotOS
+
+on:
+  push:
+    branches: [ourOS]
+    tags: ['v*']
+  pull_request:
+    branches: [ourOS]
+
+env:
+  BUILDROOT_VERSION: "2024.02.8"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc g++ make patch \
+            cpio unzip rsync bc wget file \
+            libncurses-dev python3 perl
+
+      - name: Cache Buildroot downloads
+        uses: actions/cache@v4
+        with:
+          path: buildroot/dl
+          key: buildroot-dl-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('configs/linxdot_ld1001_defconfig') }}
+          restore-keys: |
+            buildroot-dl-${{ env.BUILDROOT_VERSION }}-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildroot-ccache
+          key: ccache-${{ env.BUILDROOT_VERSION }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ env.BUILDROOT_VERSION }}-
+
+      - name: Download and extract Buildroot
+        run: |
+          if [ ! -d buildroot ]; then
+            wget -q "https://buildroot.org/downloads/buildroot-${BUILDROOT_VERSION}.tar.xz"
+            tar xf "buildroot-${BUILDROOT_VERSION}.tar.xz"
+            mv "buildroot-${BUILDROOT_VERSION}" buildroot
+          fi
+
+      - name: Configure Buildroot
+        run: |
+          cd buildroot
+          make BR2_EXTERNAL="$(pwd)/.." linxdot_ld1001_defconfig
+
+      - name: Build
+        run: |
+          cd buildroot
+          make -j$(nproc)
+
+      - name: Compress image
+        run: |
+          cd buildroot/output/images
+          xz -9 -T0 -k linxdot-basics-station.img
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linxdot-emmc-image
+          path: buildroot/output/images/linxdot-basics-station.img.xz
+          retention-days: 30
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: buildroot/output/images/linxdot-basics-station.img.xz
+          generate_release_notes: true

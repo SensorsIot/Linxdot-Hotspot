@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# S80dockercompose - Start Basics Station container via docker-compose
+#
+
+SYS_CONF=/etc/docker-compose.yml
+USER_CONF=/data/docker-compose.yml
+PROG=/usr/bin/docker-compose
+LOG=/var/log/docker-compose.log
+
+[ -x "$PROG" ] || exit 0
+
+# Use user config if present, otherwise system config
+if [ -f "$USER_CONF" ]; then
+    CONF="$USER_CONF"
+else
+    CONF="$SYS_CONF"
+fi
+
+[ -s "$CONF" ] || exit 0
+
+wait_for_docker() {
+    for i in $(seq 1 60); do
+        docker ps >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    echo "S80dockercompose: dockerd not ready after 60s"
+    return 1
+}
+
+case "$1" in
+    start)
+        echo "S80dockercompose: waiting for Docker"
+        wait_for_docker || exit 1
+
+        echo "S80dockercompose: starting containers"
+        export COMPOSE_HTTP_TIMEOUT=300
+        $PROG -f "$CONF" pull >> "$LOG" 2>&1
+        $PROG -f "$CONF" up -d >> "$LOG" 2>&1
+        ;;
+    stop)
+        echo "S80dockercompose: stopping containers"
+        $PROG -f "$CONF" stop >> "$LOG" 2>&1
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

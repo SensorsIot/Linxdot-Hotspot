@@ -1,0 +1,73 @@
+#!/bin/sh
+#
+# S01mountall - Mount overlayfs for writable directories on top of read-only rootfs
+#
+
+mount_overlay() {
+    lower="$1"
+    upper="$2"
+    work="$3"
+    target="$4"
+
+    mkdir -p "$upper" "$work" "$target"
+    mount -t overlay overlay \
+        -o "lowerdir=${lower},upperdir=${upper},workdir=${work}" \
+        "$target"
+}
+
+mount_cgroupfs() {
+    # cgroup2 for kernels >= 5.x
+    kernel_maj=$(uname -r | cut -d. -f1)
+    if [ "$kernel_maj" -ge 5 ]; then
+        mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
+    else
+        # Fallback: mount cgroup v1 subsystems
+        mount -t tmpfs cgroup_root /sys/fs/cgroup 2>/dev/null
+        for subsys in cpuset cpu cpuacct blkio memory devices freezer pids; do
+            mkdir -p /sys/fs/cgroup/$subsys
+            mount -t cgroup -o $subsys cgroup /sys/fs/cgroup/$subsys 2>/dev/null
+        done
+    fi
+}
+
+case "$1" in
+    start)
+        # Only set up overlays if /data is mounted
+        if ! mountpoint -q /data 2>/dev/null; then
+            echo "S01mountall: /data not mounted, skipping overlays"
+            exit 0
+        fi
+
+        echo "S01mountall: mounting overlayfs"
+        mount_overlay /usr \
+            /data/overlay/usr/upper \
+            /data/overlay/usr/work \
+            /usr
+
+        mount_overlay /var/log \
+            /data/overlay/var_log/upper \
+            /data/overlay/var_log/work \
+            /var/log
+
+        mount_overlay /var/lib \
+            /data/overlay/var_lib/upper \
+            /data/overlay/var_lib/work \
+            /var/lib
+
+        echo "S01mountall: mounting cgroupfs"
+        mount_cgroupfs
+
+        # If user has a custom docker-compose.yml on /data, use it
+        if [ -f /data/docker-compose.yml ]; then
+            mount -o bind /data/docker-compose.yml /etc/docker-compose.yml
+        fi
+        ;;
+    stop)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
+
+exit 0

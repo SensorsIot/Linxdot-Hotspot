@@ -1,0 +1,7 @@
+config BR2_PACKAGE_DOCKER_COMPOSE_V1
+	bool "docker-compose-v1"
+	depends on BR2_aarch64
+	help
+	  Docker Compose v1 (1.29.2) static binary for aarch64.
+
+	  https://github.com/docker/compose

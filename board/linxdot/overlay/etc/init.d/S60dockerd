@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# S60dockerd - Start Docker daemon with data on /data/docker
+#
+
+PROG=/usr/bin/dockerd
+LOG=/var/log/dockerd.log
+
+[ -x "$PROG" ] || exit 0
+
+case "$1" in
+    start)
+        echo "S60dockerd: starting Docker engine"
+        mkdir -p /data/docker /var/run/docker
+        $PROG --data-root /data/docker \
+               -H unix:///var/run/docker.sock \
+               -G root \
+               --storage-driver overlay2 \
+               > "$LOG" 2>&1 &
+        ;;
+    stop)
+        echo "S60dockerd: stopping Docker engine"
+        killall dockerd 2>/dev/null
+        ;;
+    restart)
+        "$0" stop
+        sleep 2
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

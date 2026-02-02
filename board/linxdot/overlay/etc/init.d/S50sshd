@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# S50sshd - Start Dropbear SSH daemon
+#
+
+PROG=/usr/sbin/dropbear
+PIDFILE=/var/run/dropbear.pid
+
+case "$1" in
+    start)
+        echo "S50sshd: starting Dropbear"
+        # Generate host keys if missing
+        mkdir -p /etc/dropbear
+        if [ ! -f /etc/dropbear/dropbear_ecdsa_host_key ]; then
+            dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null
+        fi
+        if [ ! -f /etc/dropbear/dropbear_ed25519_host_key ]; then
+            dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null
+        fi
+        start-stop-daemon -S -x "$PROG" -p "$PIDFILE" -- -R
+        ;;
+    stop)
+        echo "S50sshd: stopping Dropbear"
+        start-stop-daemon -K -x "$PROG" -p "$PIDFILE"
+        ;;
+    restart)
+        "$0" stop
+        sleep 1
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

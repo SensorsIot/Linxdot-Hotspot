@@ -1,0 +1,11 @@
+# Buildroot build directory
+buildroot/
+
+# WiFi firmware (not committed due to licensing)
+board/linxdot/firmware/
+
+# Editor and OS files
+*.swp
+*.swo
+*~
+.DS_Store

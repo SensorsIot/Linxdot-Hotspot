@@ -1,0 +1,19 @@
+version: '3'
+services:
+  basicstation:
+    image: xoseperez/basicstation:latest
+    container_name: basicstation
+    restart: always
+    privileged: true
+    network_mode: host
+    environment:
+      MODEL: SX1302
+      INTERFACE: SPI
+      DEVICE: /dev/spidev0.0
+      RESET_GPIO: 0
+      GATEWAY_EUI_SOURCE: chip
+      TTS_REGION: eu1
+      TC_KEY: "${TC_KEY}"
+      STATION_RADIOINIT: /config/reset.sh
+    volumes:
+      - /data/basicstation:/config

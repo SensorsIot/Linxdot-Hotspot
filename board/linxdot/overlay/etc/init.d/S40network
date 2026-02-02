@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# S40network - Bring up eth0 with DHCP
+#
+
+LINK_TIMEOUT=30
+
+start_lo() {
+    ifconfig lo up
+}
+
+start_eth() {
+    echo "S40network: waiting for eth0 link"
+    ifconfig eth0 up
+
+    count=0
+    while [ "$(cat /sys/class/net/eth0/carrier 2>/dev/null)" != "1" ]; do
+        sleep 1
+        count=$((count + 1))
+        if [ $count -ge $LINK_TIMEOUT ]; then
+            echo "S40network: eth0 no link after ${LINK_TIMEOUT}s"
+            return 1
+        fi
+    done
+
+    echo "S40network: eth0 link detected, starting DHCP"
+    dhcpcd -b eth0
+}
+
+stop_eth() {
+    dhcpcd -k eth0 2>/dev/null
+    ifconfig eth0 down 2>/dev/null
+}
+
+case "$1" in
+    start)
+        start_lo
+        start_eth
+        ;;
+    stop)
+        stop_eth
+        ;;
+    restart)
+        stop_eth
+        sleep 1
+        start_eth
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0
