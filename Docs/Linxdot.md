@@ -55,7 +55,7 @@ Replace `SERVER_HOST` and `SERVER_PORT` with your target server:
 Then restart the container:
 
 ```bash
-cd /etc && docker compose restart pktfwd
+cd /etc && docker-compose restart pktfwd
 ```
 
 ### Changing the Region
@@ -307,7 +307,7 @@ The USB-C port on the board is used for both flashing (Maskrom/Loader mode via R
 3. U-Boot loads kernel from mmcblk1p1
 4. Kernel mounts mmcblk1p2 as read-only rootfs
 5. Init (BusyBox) starts services, mounts overlays from mmcblk1p3
-6. Docker starts `pktfwd` container (UDP packet forwarder for TTN/ChirpStack)
+6. Docker starts the container defined in `/etc/docker-compose.yml` (`pktfwd` or `basicstation` depending on image variant)
 
 ### Kernel Command Line
 
