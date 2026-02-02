@@ -1,12 +1,21 @@
 #!/bin/sh
 #
-# S00datapart - Create, check, and mount the /data partition
+# S00datapart - Mount pseudo-filesystems, then create/check/mount the /data partition
 #
+
+# Mount essential pseudo-filesystems first
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t tmpfs tmpfs /tmp 2>/dev/null
+mount -t tmpfs tmpfs /run -o mode=0755 2>/dev/null
 
 DATA_DEV=""
 
 detect_data_dev() {
-    root_dev=$(cat /proc/cmdline | sed -n 's/.*root=\([^ ]*\).*/\1/p')
+    root_dev=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
     case "$root_dev" in
         /dev/mmcblk*p*)
             disk_dev="${root_dev%p*}"
@@ -50,6 +59,7 @@ case "$1" in
             mkdir -p /data/overlay/usr/upper /data/overlay/usr/work
             mkdir -p /data/overlay/var_log/upper /data/overlay/var_log/work
             mkdir -p /data/overlay/var_lib/upper /data/overlay/var_lib/work
+            mkdir -p /data/overlay/etc/upper /data/overlay/etc/work
             mkdir -p /data/basicstation
             mkdir -p /data/etc
             touch /data/.initialized

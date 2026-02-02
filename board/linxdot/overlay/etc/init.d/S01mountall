@@ -32,6 +32,12 @@ mount_cgroupfs() {
 
 case "$1" in
     start)
+        # Ensure /var/run points to /run (tmpfs mounted in S00datapart)
+        if [ ! -L /var/run ] && mountpoint -q /run 2>/dev/null; then
+            mount -t tmpfs tmpfs /var/run -o mode=0755 2>/dev/null
+        fi
+        mkdir -p /var/run
+
         # Only set up overlays if /data is mounted
         if ! mountpoint -q /data 2>/dev/null; then
             echo "S01mountall: /data not mounted, skipping overlays"
@@ -53,6 +59,11 @@ case "$1" in
             /data/overlay/var_lib/upper \
             /data/overlay/var_lib/work \
             /var/lib
+
+        mount_overlay /etc \
+            /data/overlay/etc/upper \
+            /data/overlay/etc/work \
+            /etc
 
         echo "S01mountall: mounting cgroupfs"
         mount_cgroupfs
