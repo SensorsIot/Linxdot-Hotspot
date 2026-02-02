@@ -116,22 +116,28 @@ See [BasicsStation.md](BasicsStation.md) for complete setup instructions includi
 | Property | Value |
 |----------|-------|
 | Controller | Rockchip SDHCI (fe310000.mmc) |
-| Mode | HS200 |
+| Mode | HS200, 200 MHz |
 | Device | AT2Y1B |
 | Capacity | 28.9 GiB (30,302,208 blocks) |
 | CID | `ec01004154325931422b802d00b9b800` |
+| DTB alias | `mmc1` (Linux sees it as `mmcblk1`) |
+| U-Boot device | `mmc 0` (different numbering!) |
 
 ### Partition Layout
 
 | Partition | Device | Size | Mount | Filesystem |
 |-----------|--------|------|-------|------------|
-| Boot | mmcblk1p1 | 30 MB | /boot | vfat |
+| Boot | mmcblk1p1 | 30 MB | (boot.scr, Image, DTB) | vfat |
 | Root | mmcblk1p2 | 500 MB | / | ext4 (ro) |
-| Data | mmcblk1p3 | 27.9 GB | /data | ext4 |
+| Data | mmcblk1p3 | ~27.9 GB | /data | ext4 |
 
-The rootfs is mounted read-only. Writable directories (`/usr`, `/var/log`, `/var/lib`) use overlayfs backed by `/data`.
+The rootfs is mounted read-only. Writable directories (`/usr`, `/var/log`, `/var/lib`, `/etc`) use overlayfs backed by `/data`.
 
 Boot partitions `mmcblk1boot0` and `mmcblk1boot1` are 4 MB each. There is also a 4 MB RPMB partition.
+
+Raw boot blobs (not in the partition table) are written at fixed offsets:
+- `idbloader.img` at 32 KiB (sector 64)
+- `u-boot.itb` at 8 MiB (sector 16384)
 
 ## Power Management
 
@@ -242,9 +248,12 @@ All UARTs are 16550A compatible.
 
 The serial console (ttyS2) is exposed via a **Tensility 54-00177** 3.5mm 4-conductor audio jack on the board edge.
 
-- **Baud rate:** 1,500,000 (1.5 Mbaud)
+- **Baud rate:** 1,500,000 (1.5 Mbaud) — **all boot stages use this rate**
 - **Settings:** 8N1 (8 data bits, no parity, 1 stop bit)
+- **DTB stdout-path:** `serial2:1500000n8`
 - **Kernel command line:** `console=ttyS2,1500000`
+
+The baud rate is set in the vendor DTB `chosen` node and cannot be changed without rebuilding the DTB or kernel. Setting a different baud rate in the kernel bootargs (e.g., 115200) results in **no kernel console output**.
 
 See `Docs/54-00177.pdf` for the audio jack datasheet and pinout.
 
@@ -303,28 +312,52 @@ The USB-C port on the board is used for both flashing (Maskrom/Loader mode via R
 ## Boot Process
 
 1. RK3566 BootROM loads SPL from eMMC boot partition (or enters Maskrom mode if no valid bootloader)
-2. SPL (`rk356x_spl_loader_ddr1056_v1.10.111.bin`) initializes DDR and loads U-Boot
-3. U-Boot loads kernel from mmcblk1p1
-4. Kernel mounts mmcblk1p2 as read-only rootfs
-5. Init (BusyBox) starts services, mounts overlays from mmcblk1p3
-6. Docker starts the container defined in `/etc/docker-compose.yml` (`pktfwd` or `basicstation` depending on image variant)
+2. SPL (`rk356x_spl_loader_ddr1056_v1.10.111.bin`) initializes DDR at 1056 MHz and loads U-Boot
+3. U-Boot (2017.09, vendor fork) runs `distro_bootcmd`, finds `boot.scr` on the boot partition
+4. `boot.scr` loads kernel Image and DTB from the boot partition, sets bootargs, and boots the kernel
+5. Kernel mounts mmcblk1p2 as read-only rootfs
+6. BusyBox init runs `rcS` which executes init scripts (S00–S80)
+7. Docker starts the container defined in `/etc/docker-compose.yml`
+
+### U-Boot Details
+
+| Property | Value |
+|----------|-------|
+| Version | U-Boot 2017.09 (Rockchip vendor fork) |
+| Console | ttyS2 @ 1,500,000 baud |
+| eMMC device | `mmc 0` (sdhci@fe310000) |
+| Boot sequence | Android boot → FIT image → distro_bootcmd (finds boot.scr) |
+| Autoboot | `Hit key to stop autoboot('CTRL+C')` — interrupt with Ctrl+C |
+
+### MMC Device Numbering (Important)
+
+U-Boot and the Linux kernel assign **different device numbers** to the same hardware:
+
+| Device | U-Boot | Linux kernel | DTB alias |
+|--------|--------|-------------|-----------|
+| eMMC (sdhci@fe310000) | `mmc 0` | `mmcblk1` | `mmc1` |
+| SD slot (dwmmc@fe2b0000) | `mmc 1` | `mmcblk0` | `mmc0` |
+| SDIO/WiFi (dwmmc@fe2c0000) | `mmc 2` | — | `mmc2` |
+
+This means boot.scr must use `load mmc 0:1` to load files, but the kernel bootargs must specify `root=/dev/mmcblk1p2`.
 
 ### Kernel Command Line
 
 ```
-root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro rootflags=noload console=ttyS2,1500000 panic=10 hung_task_panic=1 quiet loglevel=1
+root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro console=ttyS2,1500000 panic=10
 ```
 
 ## Software
 
 | Component | Details |
 |-----------|---------|
-| OS | CrankkOS (Buildroot-based) |
-| Kernel | Linux 5.15.104 (aarch64) |
-| Compiler | aarch64-none-linux-gnu-gcc 10.3.1 |
+| OS | LinxdotOS (Buildroot 2024.02.8, replaces CrankkOS) |
+| Kernel | Linux 5.15.104 (aarch64, prebuilt vendor binary) |
+| Compiler | aarch64-none-linux-gnu-gcc 10.3.1 (original kernel build) |
 | Init | BusyBox |
-| Container runtime | Docker with docker-compose |
+| Container runtime | Docker with docker-compose v2.32.4 |
 | SSH | Dropbear |
+| Rootfs | Read-only ext4 with overlayfs on `/data` partition |
 
 ## Connectors (External)
 

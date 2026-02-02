@@ -3,8 +3,8 @@
 # Startup the system
 ::sysinit:/etc/init.d/rcS
 
-# Start a getty on the serial console at 115200 baud
-ttyS2::respawn:/sbin/getty -L ttyS2 115200 vt100
+# Start a getty on the serial console at 1500000 baud (must match vendor DTB stdout-path)
+ttyS2::respawn:/sbin/getty -L ttyS2 1500000 vt100
 
 # Stuff to do for the 3-finger salute
 ::ctrlaltdel:/sbin/reboot

@@ -12,13 +12,13 @@ LinxdotOS replaces the entire CrankkOS userspace with a clean Buildroot rootfs w
 BootROM
   → SPL / idbloader (Rockchip blob, DDR init, 1.5Mbaud)
     → U-Boot proper (u-boot.itb, 1.5Mbaud)
-      → Linux 5.15.104 (console=ttyS2,115200)
+      → Linux 5.15.104 (console=ttyS2,1500000)
         → BusyBox init
           → S00datapart  → S01mountall → S40network
           → S50sshd → S60dockerd → S80dockercompose
 ```
 
-SPL and U-Boot output at 1.5Mbaud (appears as garbage on a 115200 terminal). The kernel, getty, and all userspace run at 115200. Phase 3 will rebuild U-Boot at 115200.
+SPL and U-Boot output at 1.5Mbaud. The vendor kernel and DTB (`stdout-path = "serial2:1500000n8"`) require the console at 1.5Mbaud — **changing to 115200 results in no kernel output**. Phase 3 (rebuild U-Boot + kernel) will allow changing the console baud rate.
 
 ## Step 1: Extract Files from CrankkOS Image
 
@@ -64,7 +64,7 @@ dd if=crankkos.img of=board/linxdot/blobs/u-boot.itb bs=512 skip=16384 count=163
 | `Image` | `/tmp/crankk-boot/Image` | 22.3 MB |
 | `rk3566-linxdot.dtb` | `/tmp/crankk-boot/rk3566-linxdot.dtb` | 43 KB |
 
-The boot partition also contained `boot.scr`, `initrd.gz`, and `uEnv.txt`. The original `uEnv.txt` set `console=ttyS2,1500000` — we replace this with our own `boot.cmd` at 115200.
+The boot partition also contained `boot.scr`, `initrd.gz`, and `uEnv.txt`. The original `uEnv.txt` set `console=ttyS2,1500000` — we replace this with our own `boot.cmd` (also at 1500000 to match the vendor DTB `stdout-path`).
 
 ### Kernel Modules (from rootfs)
 
@@ -156,17 +156,38 @@ The data partition is created at 64 MB in the image. On first boot, `S00datapart
 `board/linxdot/boot.cmd`:
 
 ```
-setenv bootargs "root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro console=ttyS2,115200 panic=10 quiet loglevel=1"
-load mmc 1:1 ${kernel_addr_r} Image
-load mmc 1:1 ${fdt_addr_r} rk3566-linxdot.dtb
+setenv bootargs "root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro console=ttyS2,1500000 panic=10"
+if load mmc 0:1 ${kernel_addr_r} Image; then
+    load mmc 0:1 ${fdt_addr_r} rk3566-linxdot.dtb
+else
+    load mmc 1:1 ${kernel_addr_r} Image
+    load mmc 1:1 ${fdt_addr_r} rk3566-linxdot.dtb
+fi
 booti ${kernel_addr_r} - ${fdt_addr_r}
 ```
 
 This is compiled to `boot.scr` by `post-image.sh` using `mkimage`. Key differences from CrankkOS:
 
-- Console baud changed from 1500000 to **115200**
 - Root filesystem mounted **read-only** (`ro`)
 - No initrd (CrankkOS shipped `initrd.gz` — we boot directly)
+- Fallback logic tries `mmc 0` then `mmc 1` (see caveat below)
+
+### Important: U-Boot vs Kernel MMC Numbering
+
+**U-Boot and the Linux kernel use different MMC device numbering.** This is a critical detail:
+
+| Context | eMMC device | Source |
+|---------|------------|--------|
+| U-Boot `mmc` command | `mmc 0` (sdhci@fe310000) | U-Boot's own probe order |
+| Linux kernel `/dev/` | `mmcblk1` | DTB alias: `mmc1 = "/mmc@fe310000"` |
+
+The DTB `aliases` section defines `mmc0 = "/mmc@fe2b0000"` (SD card slot), `mmc1 = "/mmc@fe310000"` (eMMC), and `mmc2 = "/mmc@fe2c0000"` (SDIO/WiFi). U-Boot probes in a different order and assigns eMMC as device 0.
+
+Therefore: **U-Boot loads files with `load mmc 0:1`** but the **kernel root must be `root=/dev/mmcblk1p2`**.
+
+### Console Baud Rate
+
+The vendor DTB contains `chosen { stdout-path = "serial2:1500000n8"; }`. The vendor kernel (5.15.104) respects this and only produces console output at 1,500,000 baud. Setting `console=ttyS2,115200` in bootargs results in **no kernel output** on the serial port. The getty must also run at 1500000 to match.
 
 ## Step 6: Create Rootfs Overlay and Init Scripts
 
@@ -176,12 +197,12 @@ The overlay at `board/linxdot/overlay/` is copied on top of the Buildroot rootfs
 
 ```
 ::sysinit:/etc/init.d/rcS
-ttyS2::respawn:/sbin/getty -L ttyS2 115200 vt100
+ttyS2::respawn:/sbin/getty -L ttyS2 1500000 vt100
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/etc/init.d/rcK
 ```
 
-Changed from CrankkOS: getty on `ttyS2` at `115200` (was `ttylogin` at `1500000`).
+Getty runs at 1,500,000 baud to match the vendor kernel/DTB console speed.
 
 ### `etc/fstab`
 
@@ -189,26 +210,36 @@ Static mounts for proc, sysfs, devtmpfs, devpts, and tmpfs for `/tmp` and `/run`
 
 ### Init Scripts
 
-#### S00datapart — Data partition setup
+#### S00datapart — Pseudo-filesystems and data partition setup
 
-1. Detects the disk device from `/proc/cmdline` root= parameter
-2. Derives the data partition path (partition 3)
-3. Runs `e2fsck -pf` for filesystem consistency
-4. Runs `resize2fs` to expand to full eMMC (no-op after first boot)
-5. Mounts to `/data`
-6. On first boot, creates skeleton directories: `/data/docker`, `/data/overlay/{usr,var_log,var_lib}/{upper,work}`, `/data/basicstation`, `/data/etc`
+**Must run first.** Mounts essential pseudo-filesystems before anything else:
+
+1. Mounts `/proc`, `/sys`, `/dev`, `/dev/pts`, `/tmp` (tmpfs), `/run` (tmpfs)
+2. Detects the disk device from `/proc/cmdline` root= parameter
+3. Derives the data partition path (partition 3)
+4. Runs `e2fsck -pf` for filesystem consistency
+5. Runs `resize2fs` to expand to full eMMC (no-op after first boot)
+6. Mounts to `/data`
+7. On first boot, creates skeleton directories: `/data/docker`, `/data/overlay/{usr,var_log,var_lib,etc}/{upper,work}`, `/data/basicstation`, `/data/etc`
+
+**Lesson learned:** BusyBox init runs `rcS` (which executes init scripts) *before* mounting fstab entries. Without early `/proc` mount, `/proc/cmdline` is unavailable and the data partition detection fails, cascading into read-only filesystem errors for all subsequent services.
 
 #### S01mountall — Overlay filesystems
 
-Mounts three overlayfs instances backed by `/data`:
+Ensures `/var/run` is writable (mounts tmpfs if not already a symlink to `/run`), then mounts four overlayfs instances backed by `/data`:
 
 | Mount point | Lower (ro rootfs) | Upper (rw on /data) |
 |-------------|-------------------|---------------------|
 | `/usr` | `/usr` | `/data/overlay/usr/upper` |
 | `/var/log` | `/var/log` | `/data/overlay/var_log/upper` |
 | `/var/lib` | `/var/lib` | `/data/overlay/var_lib/upper` |
+| `/etc` | `/etc` | `/data/overlay/etc/upper` |
+
+The `/etc` overlay allows Dropbear to persist SSH host keys and services to modify config files at runtime on the read-only rootfs.
 
 Also mounts cgroupfs (cgroup2 on kernel 5.x) and bind-mounts `/data/docker-compose.yml` over `/etc/docker-compose.yml` if a user config exists.
+
+**Lesson learned:** Without `/var/run` as tmpfs, both `dhcpcd` and `dropbear` fail to create their PID files and socket directories, preventing networking and SSH.
 
 #### S40network — Ethernet DHCP
 
@@ -247,11 +278,13 @@ Basics Station config using the `xoseperez/basicstation` image:
 | `TTS_REGION` | `eu1` | TTN cluster |
 | `TC_KEY` | `${TC_KEY}` | Set by user in `/data/docker-compose.yml` |
 
-## Step 7: Create docker-compose v1 Package
+## Step 7: Create docker-compose Package
 
-`package/docker-compose-v1/` is a Buildroot generic package that downloads the static `docker-compose` 1.29.2 aarch64 binary from the GitHub releases page and installs it to `/usr/bin/docker-compose`.
+`package/docker-compose-v1/` is a Buildroot generic package that downloads the static `docker-compose` v2.32.4 aarch64 binary from the GitHub releases page and installs it to `/usr/bin/docker-compose`.
 
-The package uses Buildroot's `generic-package` infrastructure with a custom extract step (the download is a single binary, not a tarball).
+The package uses Buildroot's `generic-package` infrastructure with a custom extract step (the download is a single binary, not a tarball). Despite the directory name `docker-compose-v1`, it ships **v2** which is a drop-in replacement (same CLI interface, same YAML format).
+
+**Lesson learned:** The original docker-compose v1 (1.29.2) `aarch64` binary was removed from GitHub releases, causing a 404 download error in CI. Docker Compose v2 static binaries are actively maintained and available.
 
 ## Step 8: Create post-build.sh
 
@@ -293,15 +326,19 @@ ls -lh output/images/linxdot-basics-station.img
 
 ### Flashing via Raspberry Pi
 
+The Linxdot is connected to a Raspberry Pi via USB-C for flashing. The device must be in Loader or Maskrom mode (hold the boot button while power cycling, or enter via `rkdeveloptool rd`).
+
 ```sh
 scp output/images/linxdot-basics-station.img pi@192.168.0.41:/tmp/
 
 ssh pi@192.168.0.41 '
-  sudo rkdeveloptool db /tmp/rk356x_spl_loader_ddr1056_v1.10.111.bin
+  sudo rkdeveloptool ld                    # Verify device is detected
   sudo rkdeveloptool wl 0 /tmp/linxdot-basics-station.img
-  sudo rkdeveloptool rd
+  sudo rkdeveloptool rd                    # Reboot device
 '
 ```
+
+**Note:** When flashing in Loader mode (not Maskrom), there is no need to download a separate SPL loader binary — `rkdeveloptool wl 0` writes the entire image including the idbloader region.
 
 See [Flashing.md](Flashing.md) for the full procedure.
 
@@ -316,12 +353,14 @@ See [Flashing.md](Flashing.md) for the full procedure.
 **Build steps:**
 1. Checkout with LFS
 2. Install build dependencies
-3. Download and extract Buildroot
+3. Download and extract Buildroot (with cache-aware logic, see caveat below)
 4. `make BR2_EXTERNAL=.. linxdot_ld1001_defconfig`
 5. `make -j$(nproc)`
 6. Compress with `xz -9 -T0`
 7. Upload as GitHub Actions artifact (30-day retention)
 8. On tag push (`v*`): create GitHub Release with the image attached
+
+**Lesson learned (CI caching):** The `buildroot/dl/` cache creates the `buildroot/` parent directory as a side effect. A naive `if [ ! -d buildroot ]` check then skips the Buildroot download, leaving an empty directory with no Makefile. The fix is to check `if [ ! -f buildroot/Makefile ]` and use `rsync` to merge the extracted Buildroot into the existing directory (preserving the cached `dl/` contents).
 
 ## Repository Structure
 
@@ -373,11 +412,11 @@ Linxdot-Hotspot/
 
 ## Verification Checklist
 
-After flashing, verify the following over serial (115200 baud) or SSH:
+After flashing, verify the following over serial (1500000 baud) or SSH:
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Boot to login | Serial console | Garbage during SPL/U-Boot, then clean kernel output + `linxdot login:` |
+| Boot to login | Serial console @ 1500000 | SPL/U-Boot output, then kernel boot messages + `buildroot login:` |
 | Network | `ip addr show eth0` | DHCP address assigned |
 | SSH | `ssh root@<ip>` | Password: `crankk` |
 | Docker | `docker info` | storage driver: overlay2, data-root: `/data/docker` |
@@ -385,11 +424,13 @@ After flashing, verify the following over serial (115200 baud) or SSH:
 | Read-only rootfs | `mount \| grep "on / "` | Shows `ro` |
 | Persistent data | `echo test > /data/test && reboot` | File survives reboot |
 | Overlay | `touch /usr/testfile && reboot` | File persists via overlayfs on `/data` |
+| /proc mounted | `cat /proc/cmdline` | Shows kernel boot parameters |
+| /var/run writable | `ls /var/run/` | Contains dhcpcd/, dropbear.pid, docker.sock |
 
 ## Future Phases
 
 | Phase | Scope |
 |-------|-------|
-| **Phase 2** | Build Linux 6.1 LTS kernel from source (validate SPI, Ethernet, SDIO WiFi, I2C) |
-| **Phase 3** | Build U-Boot + TF-A from source (console at 115200, full bootarg control) |
+| **Phase 2** | Build Linux 6.1 LTS kernel from source (validate SPI, Ethernet, SDIO WiFi, I2C). This will allow changing the console baud rate to 115200 by modifying the DTB `stdout-path`. |
+| **Phase 3** | Build U-Boot + TF-A from source (console at 115200, deterministic mmc numbering, full bootarg control) |
 | **Phase 4** | Replace vendor DTB with curated in-tree DTS |
