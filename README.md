@@ -7,7 +7,7 @@
 ![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based on a modified CrankkOS image. Runs a configurable Semtech UDP packet forwarder for **TTN**, **ChirpStack**, or any LoRa network server.
+Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based on a modified CrankkOS image. Two image variants are provided: a **Semtech UDP packet forwarder** and a **LoRa Basics Station** (WebSocket/TLS) for **TTN**, **ChirpStack**, or any compatible LoRa network server.
 
 ## :zap: Hardware
 
@@ -28,7 +28,7 @@ Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based o
 ```
 .
 ├── Docs/
-│   ├── Linxdot.md              # Hardware reference & image build docs
+│   ├── Linxdot.md              # Hardware reference, gateway config & Basics Station docs
 │   ├── Flashing.md             # Step-by-step flashing guide
 │   ├── 54-00177.pdf            # Serial console jack datasheet
 │   ├── IMG_4225.JPG            # Board photo (front)
@@ -36,7 +36,8 @@ Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based o
 │   ├── 01-02-_2026_21-17-08.png  # Jack pin diagram
 │   └── 01-02-_2026_21-17-19.png  # Jack PCB layout
 ├── Images/
-│   └── crankkos-linxdotrk3566-1.0.0.img.xz  # Firmware image (65 MB)
+│   ├── crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz        # UDP packet forwarder image
+│   └── crankkos-linxdotrk3566-1.0.0-basicstation.img.xz   # Basics Station image
 └── README.md
 ```
 
@@ -48,8 +49,11 @@ Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based o
 
 ```bash
 rkdeveloptool db rk356x_spl_loader_ddr1056_v1.10.111.bin
-xz -dk Images/crankkos-linxdotrk3566-1.0.0.img.xz
-rkdeveloptool wl 0 Images/crankkos-linxdotrk3566-1.0.0.img
+# Choose one:
+xz -dk Images/crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz        # UDP packet forwarder
+xz -dk Images/crankkos-linxdotrk3566-1.0.0-basicstation.img.xz   # Basics Station
+# Flash:
+rkdeveloptool wl 0 Images/crankkos-linxdotrk3566-1.0.0-pktfwd.img
 rkdeveloptool rd
 ```
 
@@ -63,7 +67,7 @@ The firmware is based on the original CrankkOS image with these fixes:
 |-----|---------|
 | :white_check_mark: Ethernet link detection | `mii-tool` replaced with `/sys/class/net/carrier` (RTL8211F doesn't support MII) |
 | :white_check_mark: Serial console baud rate | Getty baud changed from 115200 to 1500000 to match kernel console |
-| :white_check_mark: Docker containers | Single UDP packet forwarder container, configurable for TTN/ChirpStack (replaced Crankk/Helium services) |
+| :white_check_mark: Docker containers | Two image variants: UDP packet forwarder (`pktfwd`) or Basics Station (`basicstation`) for TTN/ChirpStack |
 | :white_check_mark: Root password | Set to `crankk` |
 | :white_check_mark: Crontab cleanup | Removed Crankk-specific jobs |
 

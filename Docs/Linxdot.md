@@ -83,6 +83,79 @@ You should see:
 3. Periodic `PUSH_ACK` and `PULL_ACK` messages confirming connectivity to the server
 
 
+## Basics Station (Alternative to UDP Packet Forwarder)
+
+The default image uses a Semtech UDP packet forwarder. An alternative **Basics Station** image is available that uses the LoRa Basics Station protocol instead. Basics Station connects to the network server over WebSocket/TLS, which provides several advantages over UDP:
+
+- **Authenticated and encrypted:** TLS connection with API key authentication (no open UDP ports)
+- **NAT-friendly:** Outbound WebSocket connection works behind firewalls without port forwarding
+- **Centralized configuration:** Frequency plan is downloaded from the server, not configured locally
+- **Standard protocol:** Supported natively by TTN, ChirpStack v4+, and AWS IoT Core for LoRaWAN
+
+### Image Variants
+
+| Image | Protocol | Container |
+|-------|----------|-----------|
+| `crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz` | Semtech UDP | `pktfwd` |
+| `crankkos-linxdotrk3566-1.0.0-basicstation.img.xz` | LoRa Basics Station (WebSocket/TLS) | `basicstation` |
+
+Both images share the same base CrankkOS system. Only the `/etc/docker-compose.yml` differs.
+
+### TTN Setup for Basics Station
+
+1. Register the gateway on [TTN Console](https://console.cloud.thethings.network/)
+   - Use the gateway EUI from `docker logs basicstation` or the chip ID
+   - Set the frequency plan for your region
+
+2. Create an API key:
+   - Go to your gateway's **API Keys** page
+   - Click **Add API key**
+   - Grant the **Link as Gateway to a Gateway Server for traffic exchange** right
+   - Copy the key immediately (it is shown only once)
+
+3. Set the `TC_KEY` on the device:
+
+```bash
+ssh root@<linxdot-ip>
+# Edit /etc/docker-compose.yml and replace ${TC_KEY} with your API key:
+vi /etc/docker-compose.yml
+# Or set it as an environment variable in /data/etc/docker-compose.env:
+echo "TC_KEY=NNSXS.XXXXXXX..." > /data/etc/docker-compose.env
+cd /etc && docker compose up -d
+```
+
+### Basics Station Configuration
+
+The Basics Station image uses the `xoseperez/basicstation` Docker image with these defaults:
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| `MODEL` | `SX1302` | Concentrator chip model |
+| `INTERFACE` | `SPI` | Bus interface |
+| `DEVICE` | `/dev/spidev0.0` | SPI device path |
+| `RESET_GPIO` | `15` | Concentrator reset GPIO |
+| `POWER_EN_GPIO` | `23` | Concentrator power enable GPIO |
+| `POWER_EN_LOGIC` | `1` | Power enable active level |
+| `TTS_REGION` | `eu1` | TTN cluster (`eu1`, `nam1`, `au1`) |
+| `TC_KEY` | (must be set) | TTN API key for gateway authentication |
+| `GATEWAY_EUI_SOURCE` | `chip` | Derive EUI from concentrator hardware |
+
+To change the TTN region, edit `TTS_REGION` in `/etc/docker-compose.yml`.
+
+### Verifying Basics Station
+
+```bash
+docker logs -f basicstation
+```
+
+You should see:
+1. Concentrator initialization and EUI detection
+2. `Connecting to wss://eu1.cloud.thethings.network:8887/...` (WebSocket connection)
+3. `Connected` confirmation
+4. Periodic `rmtsh` and `timesync` messages
+
+On the TTN Console, the gateway status should show **Connected**.
+
 ## System on Chip
 
 | Property | Value |

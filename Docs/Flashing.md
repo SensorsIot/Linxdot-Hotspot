@@ -42,7 +42,16 @@ sudo cp rkdeveloptool /usr/local/bin/
 
 ### Files
 
-- `crankkos-linxdotrk3566-1.0.0.img.xz` - The OS image (included in this repo)
+Two image variants are available (choose one):
+
+| Image | Protocol | Use Case |
+|-------|----------|----------|
+| `crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz` | Semtech UDP | Simple setup, any UDP-compatible server |
+| `crankkos-linxdotrk3566-1.0.0-basicstation.img.xz` | LoRa Basics Station (WebSocket/TLS) | Authenticated, encrypted connection to TTN |
+
+Both images are included in this repo under `Images/`.
+
+You also need:
 - `rk356x_spl_loader_ddr1056_v1.10.111.bin` - Rockchip bootloader, download from [linxdot-rockchip-flash](https://github.com/fernandodev/linxdot-rockchip-flash)
 
 ## Flashing Procedure
@@ -95,16 +104,20 @@ sudo rkdeveloptool db rk356x_spl_loader_ddr1056_v1.10.111.bin
 
 ### Step 5: Write the Image
 
-Decompress the image first if needed:
+Decompress the chosen image first:
 
 ```bash
-xz -d crankkos-linxdotrk3566-1.0.0.img.xz
+# For UDP packet forwarder:
+xz -dk crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz
+# Or for Basics Station:
+xz -dk crankkos-linxdotrk3566-1.0.0-basicstation.img.xz
 ```
 
 Then write it:
 
 ```bash
-sudo rkdeveloptool wl 0 crankkos-linxdotrk3566-1.0.0.img
+sudo rkdeveloptool wl 0 crankkos-linxdotrk3566-1.0.0-pktfwd.img
+# Or: sudo rkdeveloptool wl 0 crankkos-linxdotrk3566-1.0.0-basicstation.img
 # Progress will show up to 100%
 ```
 
@@ -167,24 +180,30 @@ Reboot to apply.
 
 ### Docker Services
 
-One container runs automatically:
+One container runs automatically, depending on which image was flashed:
 
-| Container | Image | Purpose |
-|-----------|-------|---------|
-| `pktfwd` | `ghcr.io/heliumdiy/sx1302_hal:sha-87d8931` | LoRa UDP packet forwarder (SX1302) |
+| Image Variant | Container | Image | Purpose |
+|---------------|-----------|-------|---------|
+| pktfwd | `pktfwd` | `ghcr.io/heliumdiy/sx1302_hal:sha-87d8931` | LoRa UDP packet forwarder (SX1302) |
+| basicstation | `basicstation` | `xoseperez/basicstation:latest` | LoRa Basics Station (WebSocket/TLS) |
 
-The packet forwarder is preconfigured for TTN EU1 (`eu1.cloud.thethings.network:1700`). To change the network server, edit `/etc/docker-compose.yml` and update `SERVER_HOST` and `SERVER_PORT`.
+**UDP Packet Forwarder image:** Preconfigured for TTN EU1 (`eu1.cloud.thethings.network:1700`). To change the network server, edit `/etc/docker-compose.yml` and update `SERVER_HOST` and `SERVER_PORT`.
+
+**Basics Station image:** Requires a TTN API key (`TC_KEY`). See [Docs/Linxdot.md](Linxdot.md#basics-station-alternative-to-udp-packet-forwarder) for setup instructions.
 
 Check status:
 
 ```bash
 docker ps
-docker logs pktfwd
+docker logs pktfwd        # UDP variant
+docker logs basicstation   # Basics Station variant
 ```
 
 ### Region Configuration
 
-The default region is EU868. To change it, edit `/etc/docker-compose.yml` and update `REGION` to your region (e.g., `US915`, `AU915`).
+**UDP image:** Edit `/etc/docker-compose.yml` and update `REGION` (e.g., `US915`, `AU915`).
+
+**Basics Station image:** Edit `/etc/docker-compose.yml` and update `TTS_REGION` (e.g., `nam1`, `au1`). The frequency plan is downloaded from the server.
 
 ### Tailscale (Optional)
 
@@ -230,15 +249,21 @@ cd /etc && docker-compose up -d
 
 ## Image Modifications
 
-The image was built by modifying the base CrankkOS 1.0.0 image. The changes made:
+Both images are built by modifying the base CrankkOS 1.0.0 image. Common changes:
 
-1. **`/etc/docker-compose.yml`** - Single `pktfwd` container with configurable `SERVER_HOST`/`SERVER_PORT` (default: TTN EU1)
-2. **`/opt/packet_forwarder/setup_server.sh`** - Startup script that patches server address, port, and gateway EUI in config
-3. **`/opt/packet_forwarder/tools/reset_lgw.sh.linxdot`** - LDO reset script for SX1302
-4. **`/usr/share/dataskel/etc/shadow`** - Set root password to `crankk`
-5. **`/etc/crontabs/root`** - Cleaned up crontab (logrotate only)
-6. **`/etc/inittab`** - Fixed serial getty baud rate (115200 -> 1500000)
-7. **`/etc/init.d/S40network`** - Replaced `mii-tool` with `/sys/class/net/carrier` for link detection, increased link negotiation timeout
+1. **`/usr/share/dataskel/etc/shadow`** - Set root password to `crankk`
+2. **`/etc/crontabs/root`** - Cleaned up crontab (logrotate only)
+3. **`/etc/inittab`** - Fixed serial getty baud rate (115200 -> 1500000)
+4. **`/etc/init.d/S40network`** - Replaced `mii-tool` with `/sys/class/net/carrier` for link detection, increased link negotiation timeout
+5. **`/opt/packet_forwarder/tools/reset_lgw.sh.linxdot`** - LDO reset script for SX1302
+
+**pktfwd image** additionally has:
+- **`/etc/docker-compose.yml`** - Single `pktfwd` container with configurable `SERVER_HOST`/`SERVER_PORT` (default: TTN EU1)
+- **`/opt/packet_forwarder/setup_server.sh`** - Startup script that patches server address, port, and gateway EUI in config
+
+**basicstation image** additionally has:
+- **`/etc/docker-compose.yml`** - Single `basicstation` container using `xoseperez/basicstation` with SPI/GPIO config for the Linxdot hardware
+- **`/opt/packet_forwarder/setup_server.sh`** removed (not needed — Basics Station handles config natively)
 
 ## Credits
 
