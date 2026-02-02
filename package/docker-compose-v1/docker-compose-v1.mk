@@ -4,9 +4,9 @@
 #
 ################################################################################
 
-DOCKER_COMPOSE_V1_VERSION = 1.29.2
-DOCKER_COMPOSE_V1_SOURCE = docker-compose-Linux-aarch64
-DOCKER_COMPOSE_V1_SITE = https://github.com/docker/compose/releases/download/$(DOCKER_COMPOSE_V1_VERSION)
+DOCKER_COMPOSE_V1_VERSION = 2.32.4
+DOCKER_COMPOSE_V1_SOURCE = docker-compose-linux-aarch64
+DOCKER_COMPOSE_V1_SITE = https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_V1_VERSION)
 DOCKER_COMPOSE_V1_LICENSE = Apache-2.0
 
 define DOCKER_COMPOSE_V1_EXTRACT_CMDS

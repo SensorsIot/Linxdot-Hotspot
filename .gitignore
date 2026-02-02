@@ -4,6 +4,9 @@ buildroot/
 # WiFi firmware (not committed due to licensing)
 board/linxdot/firmware/
 
+# Claude Code data persistence
+.claude-data/
+
 # Editor and OS files
 *.swp
 *.swo
