@@ -196,7 +196,7 @@ One container runs automatically, depending on which image was flashed:
 
 **UDP Packet Forwarder image:** Preconfigured for TTN EU1 (`eu1.cloud.thethings.network:1700`). To change the network server, edit `/etc/docker-compose.yml` and update `SERVER_HOST` and `SERVER_PORT`.
 
-**Basics Station image:** Requires a TTN API key (`TC_KEY`). See [Docs/Linxdot.md](Linxdot.md#basics-station-alternative-to-udp-packet-forwarder) for setup instructions.
+**Basics Station image:** Requires a TTN API key (`TC_KEY`) and a concentrator reset before first use. See [BasicsStation.md](BasicsStation.md) for complete setup instructions.
 
 Check status:
 

@@ -28,7 +28,8 @@ Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based o
 ```
 .
 ├── Docs/
-│   ├── Linxdot.md              # Hardware reference, gateway config & Basics Station docs
+│   ├── Linxdot.md              # Hardware reference & gateway config
+│   ├── BasicsStation.md        # Basics Station setup guide (TTN over WebSocket/TLS)
 │   ├── Flashing.md             # Step-by-step flashing guide
 │   ├── 54-00177.pdf            # Serial console jack datasheet
 │   ├── IMG_4225.JPG            # Board photo (front)
