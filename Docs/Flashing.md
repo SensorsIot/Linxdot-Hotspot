@@ -59,9 +59,14 @@ You also need:
 ### Step 1: Enter Loader Mode
 
 1. Connect the USB-C cable between the Linxdot and your computer
+
 2. With the Linxdot **powered off**, press and hold the **BT-Pair** button
+
 3. While holding the button, plug in the power cable
+
 4. Hold for approximately 5-8 seconds
+
+   ![Flashing](Flashing.png)
 
 Verify the device is detected:
 
@@ -157,6 +162,8 @@ passwd
 ### Serial Console
 
 The serial console is available at **1500000 baud** on the 3.5mm audio jack (ttyS2):
+
+![Serial Console](Serial%20Console.png)
 
 ```bash
 picocom -b 1500000 /dev/ttyUSB0
