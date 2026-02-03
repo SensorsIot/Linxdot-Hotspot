@@ -14,12 +14,19 @@ BOARD_DIR="${BR2_EXT}/board/linxdot"
 
 echo ">>> LinxdotOS post-image: BINARIES_DIR=${BINARIES_DIR}"
 
-# ── Compile boot.cmd → boot.scr ──
-# NOTE: mkimage 2021+ adds 8-byte sub-header that vendor U-Boot 2017.09 can't parse.
-# We use our own script to create legacy-compatible format.
-echo ">>> Compiling boot.scr (legacy format for vendor U-Boot 2017.09)"
-chmod +x "${BOARD_DIR}/mkbootscr.sh"
-"${BOARD_DIR}/mkbootscr.sh" "${BOARD_DIR}/boot.cmd" "${BINARIES_DIR}/boot.scr"
+# ── Create extlinux.conf for U-Boot ──
+# NOTE: extlinux is more reliable than boot.scr on vendor U-Boot 2017.09
+echo ">>> Creating extlinux.conf"
+mkdir -p "${BINARIES_DIR}/extlinux"
+cat > "${BINARIES_DIR}/extlinux/extlinux.conf" << 'EOF'
+default linxdot
+timeout 3
+
+label linxdot
+    kernel /Image
+    fdt /rk3566-linxdot.dtb
+    append root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro console=ttyS2,1500000 panic=10
+EOF
 
 # ── Run genimage to produce the final eMMC image ──
 echo ">>> Running genimage"
