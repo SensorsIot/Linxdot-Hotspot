@@ -7,7 +7,8 @@ SYS_CONF=/etc/docker-compose.yml
 USER_CONF=/data/docker-compose.yml
 PROG=/usr/bin/docker-compose
 LOG=/var/log/docker-compose.log
-RESET_SCRIPT=/opt/packet_forwarder/tools/reset_lgw.sh.linxdot
+RESET_SCRIPT=/data/basicstation/reset.sh
+TC_KEY_FILE=/data/basicstation/tc_key.txt
 
 [ -x "$PROG" ] || exit 0
 
@@ -19,6 +20,18 @@ else
 fi
 
 [ -s "$CONF" ] || exit 0
+
+# Read TC_KEY from file (skip comment lines)
+load_tc_key() {
+    if [ -f "$TC_KEY_FILE" ]; then
+        TC_KEY=$(grep -v '^#' "$TC_KEY_FILE" | grep -v '^$' | head -1 | tr -d '[:space:]')
+        if [ -n "$TC_KEY" ]; then
+            export TC_KEY
+            return 0
+        fi
+    fi
+    return 1
+}
 
 wait_for_docker() {
     for i in $(seq 1 60); do
@@ -41,13 +54,20 @@ reset_concentrator() {
 
 case "$1" in
     start)
+        # Load TC_KEY from config file
+        if ! load_tc_key; then
+            echo "S80dockercompose: TC_KEY not configured in $TC_KEY_FILE"
+            echo "S80dockercompose: Edit the file and add your TTN API key to connect"
+            exit 0
+        fi
+
         echo "S80dockercompose: waiting for Docker"
         wait_for_docker || exit 1
 
         # Reset concentrator before starting Basics Station
         reset_concentrator
 
-        echo "S80dockercompose: starting containers"
+        echo "S80dockercompose: starting containers with Gateway connecting to TTN"
         export COMPOSE_HTTP_TIMEOUT=300
         $PROG -f "$CONF" pull >> "$LOG" 2>&1
         $PROG -f "$CONF" up -d >> "$LOG" 2>&1
@@ -60,8 +80,26 @@ case "$1" in
         "$0" stop
         "$0" start
         ;;
+    status)
+        echo "=== Basics Station Status ==="
+        if load_tc_key; then
+            echo "TC_KEY: configured (${#TC_KEY} chars)"
+        else
+            echo "TC_KEY: NOT CONFIGURED"
+            echo "  Edit $TC_KEY_FILE and add your TTN API key"
+        fi
+        echo ""
+        if [ -x "$RESET_SCRIPT" ]; then
+            echo "Reset script: OK ($RESET_SCRIPT)"
+        else
+            echo "Reset script: MISSING ($RESET_SCRIPT)"
+        fi
+        echo ""
+        echo "Docker containers:"
+        docker ps -a --filter "name=basicstation" --format "  {{.Names}}: {{.Status}}" 2>/dev/null || echo "  (docker not available)"
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart}"
+        echo "Usage: $0 {start|stop|restart|status}"
         exit 1
         ;;
 esac
