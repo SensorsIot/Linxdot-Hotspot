@@ -7,6 +7,7 @@ SYS_CONF=/etc/docker-compose.yml
 USER_CONF=/data/docker-compose.yml
 PROG=/usr/bin/docker-compose
 LOG=/var/log/docker-compose.log
+RESET_SCRIPT=/opt/packet_forwarder/tools/reset_lgw.sh.linxdot
 
 [ -x "$PROG" ] || exit 0
 
@@ -21,17 +22,30 @@ fi
 
 wait_for_docker() {
     for i in $(seq 1 60); do
-        docker ps >/dev/null 2>&1 && return 0
+        [ -S /var/run/docker.sock ] && docker info >/dev/null 2>&1 && return 0
         sleep 1
     done
     echo "S80dockercompose: dockerd not ready after 60s"
     return 1
 }
 
+reset_concentrator() {
+    if [ -x "$RESET_SCRIPT" ]; then
+        echo "S80dockercompose: resetting LoRa concentrator"
+        "$RESET_SCRIPT" stop >/dev/null 2>&1 || true
+        sleep 1
+        "$RESET_SCRIPT" start >/dev/null 2>&1 || true
+        sleep 2
+    fi
+}
+
 case "$1" in
     start)
         echo "S80dockercompose: waiting for Docker"
         wait_for_docker || exit 1
+
+        # Reset concentrator before starting Basics Station
+        reset_concentrator
 
         echo "S80dockercompose: starting containers"
         export COMPOSE_HTTP_TIMEOUT=300

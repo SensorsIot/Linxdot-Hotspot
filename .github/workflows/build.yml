@@ -9,6 +9,7 @@ on:
 
 env:
   BUILDROOT_VERSION: "2024.02.8"
+  BUILDROOT_SHA256: "cbccfdf8483304b558f71de856867bf16e0ac542302423f6ae2217f751edee18"
 
 jobs:
   build:
@@ -25,7 +26,11 @@ jobs:
           sudo apt-get install -y \
             build-essential gcc g++ make patch \
             cpio unzip rsync bc wget file \
-            libncurses-dev python3 perl
+            libncurses-dev python3 perl \
+            xz-utils git \
+            bison flex gawk gettext texinfo \
+            device-tree-compiler dosfstools mtools \
+            libssl-dev
 
       - name: Cache Buildroot downloads
         uses: actions/cache@v4
@@ -47,6 +52,7 @@ jobs:
         run: |
           if [ ! -f buildroot/Makefile ]; then
             wget -q "https://buildroot.org/downloads/buildroot-${BUILDROOT_VERSION}.tar.xz"
+            echo "${BUILDROOT_SHA256}  buildroot-${BUILDROOT_VERSION}.tar.xz" | sha256sum -c -
             tar xf "buildroot-${BUILDROOT_VERSION}.tar.xz"
             rsync -a "buildroot-${BUILDROOT_VERSION}/" buildroot/
             rm -rf "buildroot-${BUILDROOT_VERSION}"
@@ -60,7 +66,38 @@ jobs:
       - name: Build
         run: |
           cd buildroot
+          # Buildroot uses ~/.buildroot-ccache by default (BR2_CCACHE=y in defconfig)
+          mkdir -p ~/.buildroot-ccache
           make -j$(nproc)
+
+      - name: Validate image
+        run: |
+          IMG="buildroot/output/images/linxdot-basics-station.img"
+
+          # Check image exists and has reasonable size (> 100MB)
+          if [ ! -f "$IMG" ]; then
+            echo "ERROR: Image file not found"
+            exit 1
+          fi
+
+          SIZE=$(stat -c%s "$IMG")
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo "ERROR: Image too small ($SIZE bytes), expected > 100MB"
+            exit 1
+          fi
+          echo "Image size: $(numfmt --to=iec $SIZE)"
+
+          # Verify partition table
+          echo "Partition table:"
+          fdisk -l "$IMG"
+
+          # Check for expected partitions (boot, rootfs, data)
+          PARTITIONS=$(fdisk -l "$IMG" 2>/dev/null | grep -c "^$IMG")
+          if [ "$PARTITIONS" -lt 3 ]; then
+            echo "ERROR: Expected at least 3 partitions, found $PARTITIONS"
+            exit 1
+          fi
+          echo "Validation passed: $PARTITIONS partitions found"
 
       - name: Compress image
         run: |
@@ -75,7 +112,10 @@ jobs:
           retention-days: 30
 
       - name: Create release
-        if: startsWith(github.ref, 'refs/tags/v')
+        # Only create releases for tags on the main repo (not forks)
+        if: |
+          startsWith(github.ref, 'refs/tags/v') &&
+          github.repository == 'SensorsIot/Linxdot-Hotspot'
         uses: softprops/action-gh-release@v2
         with:
           files: buildroot/output/images/linxdot-basics-station.img.xz

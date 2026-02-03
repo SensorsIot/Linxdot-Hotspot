@@ -1,17 +1,12 @@
-# Flashing the Linxdot RK3566
+# Flashing LinxdotOS
 
-This guide covers flashing a minimal Linux + Docker image onto the Linxdot LD1001 (RK3566) hotspot miner.
+This guide covers flashing LinxdotOS onto the Linxdot LD1001 (RK3566) hotspot.
 
 ## Overview
 
-The Linxdot LD1001 uses a Rockchip RK3566 SoC with 2GB RAM and 32GB eMMC. Flashing is done over USB-C using the Rockchip `rkdeveloptool` while the device is in Maskrom mode.
+The Linxdot LD1001 uses a Rockchip RK3566 SoC with 2GB RAM and 32GB eMMC. Flashing is done over USB-C using the Rockchip `rkdeveloptool` while the device is in Loader or Maskrom mode.
 
-The image is based on CrankkOS 1.0.0 (a Buildroot system), modified to:
-
-- Replace Crankk/Helium containers with a configurable UDP packet forwarder for TTN/ChirpStack
-- Fix ethernet link detection (replaced `mii-tool` with `/sys/class/net/carrier` check)
-- Fix serial console getty baud rate (1500000 to match kernel console)
-- Set a default root password
+**LinxdotOS** is a custom Buildroot-based Linux distribution that runs LoRa Basics Station for TTN, ChirpStack, or any compatible LoRa network server.
 
 ## Prerequisites
 
@@ -40,19 +35,11 @@ make
 sudo cp rkdeveloptool /usr/local/bin/
 ```
 
-### Files
+### Image File
 
-Two image variants are available (choose one):
-
-| Image | Protocol | Use Case |
-|-------|----------|----------|
-| `crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz` | Semtech UDP | Simple setup, any UDP-compatible server |
-| `crankkos-linxdotrk3566-1.0.0-basicstation.img.xz` | LoRa Basics Station (WebSocket/TLS) | Authenticated, encrypted connection to TTN |
-
-Both images are included in this repo under `Images/`.
-
-You also need:
-- `rk356x_spl_loader_ddr1056_v1.10.111.bin` - Rockchip bootloader, download from [linxdot-rockchip-flash](https://github.com/fernandodev/linxdot-rockchip-flash)
+Download the latest `linxdot-basics-station.img.xz` from:
+- [GitHub Releases](https://github.com/SensorsIot/Linxdot-Hotspot/releases)
+- [GitHub Actions Artifacts](https://github.com/SensorsIot/Linxdot-Hotspot/actions)
 
 ## Flashing Procedure
 
@@ -78,65 +65,29 @@ sudo rkdeveloptool ld
 # Should show: DevNo=1 Vid=0x2207,Pid=0x350a,LocationID=xxx Loader
 ```
 
-### Step 2: Erase the Flash
+### Step 2: Write the Image
+
+Decompress the image:
 
 ```bash
-sudo rkdeveloptool ef
+xz -dk linxdot-basics-station.img.xz
 ```
 
-Wait for "Erasing flash complete." This erases the entire eMMC.
-
-### Step 3: Power Cycle into Maskrom Mode
-
-1. Unplug the Linxdot power cable (keep USB-C connected)
-2. Hold the BT-Pair button
-3. Replug the power cable while holding the button
-4. Hold for ~5 seconds
-
-Verify Maskrom mode:
+Write to the device:
 
 ```bash
-sudo rkdeveloptool ld
-# Should show: DevNo=1 Vid=0x2207,Pid=0x350a,LocationID=xxx Maskrom
-```
-
-### Step 4: Flash the Bootloader
-
-```bash
-sudo rkdeveloptool db rk356x_spl_loader_ddr1056_v1.10.111.bin
-# Should show: Downloading bootloader succeeded.
-```
-
-### Step 5: Write the Image
-
-Decompress the chosen image first:
-
-```bash
-# For UDP packet forwarder:
-xz -dk crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz
-# Or for Basics Station:
-xz -dk crankkos-linxdotrk3566-1.0.0-basicstation.img.xz
-```
-
-Then write it:
-
-```bash
-sudo rkdeveloptool wl 0 crankkos-linxdotrk3566-1.0.0-pktfwd.img
-# Or: sudo rkdeveloptool wl 0 crankkos-linxdotrk3566-1.0.0-basicstation.img
+sudo rkdeveloptool wl 0 linxdot-basics-station.img
 # Progress will show up to 100%
 ```
 
-### Step 6: Verify and Reset
+### Step 3: Reset the Device
 
 ```bash
-sudo rkdeveloptool td
-# Should show: Test Device OK.
-
 sudo rkdeveloptool rd
 # Should show: Reset Device OK.
 ```
 
-The device will now reboot into the new image.
+The device will now reboot into LinxdotOS.
 
 ## Post-Flash Setup
 
@@ -144,13 +95,13 @@ The device will now reboot into the new image.
 
 - Connect an ethernet cable to the Linxdot
 - The device will obtain an IP via DHCP
-- First boot may take 1-2 minutes as it sets up the data partition and pulls Docker images
+- First boot takes 1-2 minutes as it expands the data partition and pulls the Docker image
 
 ### SSH Access
 
 ```bash
 ssh root@<linxdot-ip>
-# Default password: crankk
+# Default password: linxdot
 ```
 
 Change the password immediately:
@@ -169,6 +120,31 @@ The serial console is available at **1500000 baud** on the 3.5mm audio jack (tty
 picocom -b 1500000 /dev/ttyUSB0
 ```
 
+### TTN Setup
+
+After first boot, configure Basics Station for TTN. See [BasicsStation.md](BasicsStation.md) for complete instructions:
+
+1. Get the Gateway EUI from `docker logs basicstation`
+2. Register the gateway on TTN Console
+3. Create an API key
+4. Set `TC_KEY` in `/data/docker-compose.yml`
+
+### Region Configuration
+
+Edit `/data/docker-compose.yml` and update `TTS_REGION`:
+
+| Region | Value |
+|--------|-------|
+| Europe | `eu1` |
+| North America | `nam1` |
+| Australia | `au1` |
+
+Then restart:
+
+```bash
+docker-compose -f /data/docker-compose.yml restart
+```
+
 ### WiFi Configuration
 
 Edit `/data/etc/wpa_supplicant.conf`:
@@ -185,55 +161,7 @@ network={
 
 Reboot to apply.
 
-### Docker Services
-
-One container runs automatically, depending on which image was flashed:
-
-| Image Variant | Container | Image | Purpose |
-|---------------|-----------|-------|---------|
-| pktfwd | `pktfwd` | `ghcr.io/heliumdiy/sx1302_hal:sha-87d8931` | LoRa UDP packet forwarder (SX1302) |
-| basicstation | `basicstation` | `xoseperez/basicstation:latest` | LoRa Basics Station (WebSocket/TLS) |
-
-**UDP Packet Forwarder image:** Preconfigured for TTN EU1 (`eu1.cloud.thethings.network:1700`). To change the network server, edit `/etc/docker-compose.yml` and update `SERVER_HOST` and `SERVER_PORT`.
-
-**Basics Station image:** Requires a TTN API key (`TC_KEY`) and a concentrator reset before first use. See [BasicsStation.md](BasicsStation.md) for complete setup instructions.
-
-Check status:
-
-```bash
-docker ps
-docker logs pktfwd        # UDP variant
-docker logs basicstation   # Basics Station variant
-```
-
-### Region Configuration
-
-**UDP image:** Edit `/etc/docker-compose.yml` and update `REGION` (e.g., `US915`, `AU915`).
-
-**Basics Station image:** Edit `/etc/docker-compose.yml` and update `TTS_REGION` (e.g., `nam1`, `au1`). The frequency plan is downloaded from the server.
-
-### Tailscale (Optional)
-
-```bash
-docker run -d \
-  --name tailscaled \
-  --restart always \
-  --network host \
-  --cap-add NET_ADMIN \
-  --cap-add NET_RAW \
-  -e TS_AUTHKEY="tskey-auth-xxxxxxxx" \
-  -e TS_EXTRA_ARGS="--advertise-exit-node" \
-  -e TS_STATE_DIR="/var/lib/tailscale" \
-  -v /var/lib:/var/lib \
-  -v /dev/net/tun:/dev/net/tun \
-  tailscale/tailscale:latest
-```
-
 ## Troubleshooting
-
-### "no link" on Wired Network
-
-The original CrankkOS uses `mii-tool` for link detection which doesn't work with the RK3566 ethernet PHY. The patched image in this repo uses `/sys/class/net/carrier` instead. If you are using an unpatched image, you can fix this by editing `/etc/init.d/S40network` and replacing all `mii-tool` calls with carrier file checks.
 
 ### Can't Enter Flash Mode
 
@@ -242,39 +170,60 @@ The original CrankkOS uses `mii-tool` for link detection which doesn't work with
 - Try holding the button for longer (up to 10 seconds)
 - If the device was previously erased, it may enter Maskrom mode automatically without the button
 
-### Serial Console Shows No Login Prompt
+### No Network After Boot
 
-The original CrankkOS runs the serial getty at 115200 baud while the kernel console is at 1500000 baud. The patched image fixes this. If using an unpatched image, edit `/etc/inittab` and change the getty baud rate to 1500000.
+Ensure ethernet is connected before powering on. The device gets its IP via DHCP.
+
+### Gateway EUI Shows eth0 Source
+
+The concentrator was not properly reset. Run:
+
+```bash
+docker-compose -f /data/docker-compose.yml down
+/opt/packet_forwarder/tools/reset_lgw.sh.linxdot stop
+/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start
+docker-compose -f /data/docker-compose.yml up -d
+```
 
 ### Docker Compose Fails on First Boot
 
-This usually means the device had no network during boot. Ensure ethernet is connected before powering on. After fixing the network, restart docker-compose:
+This usually means the device had no network during boot. After fixing the network:
 
 ```bash
-cd /etc && docker-compose up -d
+docker-compose -f /data/docker-compose.yml up -d
 ```
 
-## Image Modifications
+## Alternative: Full Erase Before Flashing
 
-Both images are built by modifying the base CrankkOS 1.0.0 image. Common changes:
+If you encounter issues, do a full erase first:
 
-1. **`/usr/share/dataskel/etc/shadow`** - Set root password to `crankk`
-2. **`/etc/crontabs/root`** - Cleaned up crontab (logrotate only)
-3. **`/etc/inittab`** - Fixed serial getty baud rate (115200 -> 1500000)
-4. **`/etc/init.d/S40network`** - Replaced `mii-tool` with `/sys/class/net/carrier` for link detection, increased link negotiation timeout
-5. **`/opt/packet_forwarder/tools/reset_lgw.sh.linxdot`** - LDO reset script for SX1302
+```bash
+# Step 1: Enter Loader mode (hold BT-Pair while powering on)
+sudo rkdeveloptool ld
+# Should show: Loader
 
-**pktfwd image** additionally has:
-- **`/etc/docker-compose.yml`** - Single `pktfwd` container with configurable `SERVER_HOST`/`SERVER_PORT` (default: TTN EU1)
-- **`/opt/packet_forwarder/setup_server.sh`** - Startup script that patches server address, port, and gateway EUI in config
+# Step 2: Erase the flash
+sudo rkdeveloptool ef
+# Wait for "Erasing flash complete."
 
-**basicstation image** additionally has:
-- **`/etc/docker-compose.yml`** - Single `basicstation` container using `xoseperez/basicstation` with SPI/GPIO config for the Linxdot hardware
-- **`/opt/packet_forwarder/setup_server.sh`** removed (not needed — Basics Station handles config natively)
+# Step 3: Power cycle into Maskrom mode
+# Unplug power, hold BT-Pair, replug power, hold 5 seconds
+sudo rkdeveloptool ld
+# Should show: Maskrom
+
+# Step 4: Download bootloader (only needed in Maskrom mode)
+sudo rkdeveloptool db rk356x_spl_loader_ddr1056_v1.10.111.bin
+
+# Step 5: Write image
+sudo rkdeveloptool wl 0 linxdot-basics-station.img
+
+# Step 6: Reset
+sudo rkdeveloptool rd
+```
+
+The bootloader file `rk356x_spl_loader_ddr1056_v1.10.111.bin` can be downloaded from [linxdot-rockchip-flash](https://github.com/fernandodev/linxdot-rockchip-flash).
 
 ## Credits
 
-- [crankkio](https://github.com/crankkio) - Original CrankkOS Buildroot image
-- [metrafonic/Linxdot-MinimalDocker](https://github.com/metrafonic/Linxdot-MinimalDocker) - Docker compose and modification guide
 - [fernandodev/linxdot-rockchip-flash](https://github.com/fernandodev/linxdot-rockchip-flash) - Linux flashing guide and bootloader
-- [heliumdiy/sx1302_hal](https://github.com/heliumdiy/sx1302_hal) - Packet forwarder Docker image
+- [xoseperez/basicstation](https://github.com/xoseperez/basicstation-docker) - Basics Station Docker image

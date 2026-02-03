@@ -83,11 +83,11 @@ You should see:
 3. Periodic `PUSH_ACK` and `PULL_ACK` messages confirming connectivity to the server
 
 
-## Basics Station (Alternative to UDP Packet Forwarder)
+## Basics Station
 
-An alternative **Basics Station** image (`crankkos-linxdotrk3566-1.0.0-basicstation.img.xz`) is available that connects to TTN over WebSocket/TLS instead of Semtech UDP. This provides authenticated, encrypted, NAT-friendly connectivity with server-side frequency plan management.
+LinxdotOS uses **LoRa Basics Station** to connect to TTN over WebSocket/TLS. This provides authenticated, encrypted, NAT-friendly connectivity with server-side frequency plan management.
 
-See [BasicsStation.md](BasicsStation.md) for complete setup instructions including TTN registration, API key configuration, concentrator reset, and troubleshooting.
+See [BasicsStation.md](BasicsStation.md) for complete setup instructions including TTN registration, API key configuration, and troubleshooting.
 
 ## System on Chip
 

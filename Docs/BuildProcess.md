@@ -128,9 +128,10 @@ include $(sort $(wildcard $(BR2_EXTERNAL_LINXDOT_PATH)/package/*/*.mk))
 | Kernel | **not built** | Phase 1 uses prebuilt 5.15.104 |
 | U-Boot | **not built** | Phase 1 uses extracted bootloader |
 | Rootfs | ext4, 500 MB, read-only | Matches CrankkOS partition size |
-| Docker | `BR2_PACKAGE_DOCKER_ENGINE` | Core requirement |
+| Docker | `BR2_PACKAGE_DOCKER_ENGINE`, `BR2_PACKAGE_DOCKER_CLI` | Core requirement |
 | SSH | Dropbear | Lightweight SSH daemon |
 | Network | dhcpcd + wpa_supplicant | Ethernet DHCP + WiFi support |
+| NTP | `BR2_PACKAGE_NTP` | Time synchronization (required for TLS) |
 | Filesystem | e2fsprogs (resize2fs) | First-boot partition expansion |
 
 The defconfig also enables ccache and host tools (genimage, dosfstools, mtools, uboot-tools) needed by the image generation scripts.
@@ -249,7 +250,7 @@ Also mounts cgroupfs (cgroup2 on kernel 5.x) and bind-mounts `/data/docker-compo
 
 #### S50sshd — Dropbear SSH
 
-Generates ECDSA and Ed25519 host keys on first boot, then starts Dropbear. Login: `root` / `crankk`.
+Generates ECDSA and Ed25519 host keys on first boot, then starts Dropbear. Login: `root` / `linxdot`.
 
 #### S60dockerd — Docker daemon
 
@@ -418,7 +419,7 @@ After flashing, verify the following over serial (1500000 baud) or SSH:
 |-------|---------|----------|
 | Boot to login | Serial console @ 1500000 | SPL/U-Boot output, then kernel boot messages + `buildroot login:` |
 | Network | `ip addr show eth0` | DHCP address assigned |
-| SSH | `ssh root@<ip>` | Password: `crankk` |
+| SSH | `ssh root@<ip>` | Password: `linxdot` |
 | Docker | `docker info` | storage driver: overlay2, data-root: `/data/docker` |
 | Basics Station | `docker logs basicstation` | Shows gateway EUI (fails without TC_KEY — expected) |
 | Read-only rootfs | `mount \| grep "on / "` | Shows `ro` |
@@ -426,6 +427,48 @@ After flashing, verify the following over serial (1500000 baud) or SSH:
 | Overlay | `touch /usr/testfile && reboot` | File persists via overlayfs on `/data` |
 | /proc mounted | `cat /proc/cmdline` | Shows kernel boot parameters |
 | /var/run writable | `ls /var/run/` | Contains dhcpcd/, dropbear.pid, docker.sock |
+| NTP time sync | `ntpq -p` or `date` | Correct current time |
+| Concentrator reset | `docker logs basicstation` | Shows `EUI Source: chip` (not `eth0`) |
+
+## Known Issues
+
+### boot.scr Execution Failure (Vendor U-Boot)
+
+The vendor U-Boot (2017.09) fails to execute the generated `boot.scr` script, displaying garbage characters:
+
+```
+## Executing script at 00c00000
+Unknown command '�����...'
+SCRIPT FAILED: continuing...
+```
+
+**Analysis:** The `boot.scr` file in the image is correctly formatted (verified via hex dump). The issue appears to be a compatibility problem between:
+- The `mkimage` tool used during the build (from Buildroot's host tools)
+- The vendor U-Boot's script parsing
+
+**Workaround:** Boot manually from the U-Boot prompt:
+
+```
+setenv bootargs root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro console=ttyS2,1500000 panic=10
+load mmc 0:1 ${kernel_addr_r} Image
+load mmc 0:1 ${fdt_addr_r} rk3566-linxdot.dtb
+booti ${kernel_addr_r} - ${fdt_addr_r}
+```
+
+**Permanent fix:** Requires Phase 3 (rebuild U-Boot from source) to ensure the script format matches.
+
+### Gateway EUI Source
+
+The Basics Station container must read the Gateway EUI from the SX1302 concentrator chip, not the Ethernet MAC. If `docker logs basicstation` shows `EUI Source: eth0`, the concentrator was not properly reset before the container started.
+
+**Fix:** The `S80dockercompose` init script now runs the concentrator reset automatically. If the EUI still shows `eth0`, manually reset:
+
+```bash
+docker-compose -f /data/docker-compose.yml down
+/opt/packet_forwarder/tools/reset_lgw.sh.linxdot stop
+/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start
+docker-compose -f /data/docker-compose.yml up -d
+```
 
 ## Future Phases
 

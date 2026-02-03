@@ -2,12 +2,12 @@
 
 ![Platform](https://img.shields.io/badge/Platform-Rockchip_RK3566-blue)
 ![LoRa](https://img.shields.io/badge/LoRa-SX1302-green)
-![OS](https://img.shields.io/badge/OS-CrankkOS_(Buildroot)-orange)
+![OS](https://img.shields.io/badge/OS-LinxdotOS_(Buildroot)-orange)
 ![Kernel](https://img.shields.io/badge/Kernel-5.15.104-yellow)
 ![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based on a modified CrankkOS image. Two image variants are provided: a **Semtech UDP packet forwarder** and a **LoRa Basics Station** (WebSocket/TLS) for **TTN**, **ChirpStack**, or any compatible LoRa network server.
+Custom **LinxdotOS** firmware for the **Linxdot LD1001** LoRa hotspot. A minimal Buildroot-based Linux + Docker system running **LoRa Basics Station** (WebSocket/TLS) for **TTN**, **ChirpStack**, or any compatible LoRa network server.
 
 ## :zap: Hardware
 
@@ -27,56 +27,85 @@ Minimal Linux + Docker firmware for the **Linxdot LD1001** LoRa hotspot, based o
 
 ```
 .
+├── board/linxdot/             # Buildroot board support
+│   ├── overlay/               # Rootfs overlay (init scripts, configs)
+│   ├── blobs/                 # Prebuilt kernel, DTB, bootloader (Git LFS)
+│   ├── modules/               # Kernel modules (Git LFS)
+│   └── genimage.cfg           # Partition layout
+├── configs/
+│   └── linxdot_ld1001_defconfig  # Buildroot defconfig
 ├── Docs/
-│   ├── Linxdot.md              # Hardware reference & gateway config
-│   ├── BasicsStation.md        # Basics Station setup guide (TTN over WebSocket/TLS)
-│   ├── Flashing.md             # Step-by-step flashing guide
-│   ├── 54-00177.pdf            # Serial console jack datasheet
-│   ├── IMG_4225.JPG            # Board photo (front)
-│   ├── IMG_E4225.JPG           # Board photo (top)
-│   ├── 01-02-_2026_21-17-08.png  # Jack pin diagram
-│   └── 01-02-_2026_21-17-19.png  # Jack PCB layout
-├── Images/
-│   ├── crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz        # UDP packet forwarder image
-│   └── crankkos-linxdotrk3566-1.0.0-basicstation.img.xz   # Basics Station image
+│   ├── Linxdot.md             # Hardware reference & gateway config
+│   ├── BasicsStation.md       # Basics Station setup guide (TTN)
+│   ├── Flashing.md            # Step-by-step flashing guide
+│   └── BuildProcess.md        # Build documentation
+├── Images/                    # Built images (CI artifacts)
 └── README.md
 ```
 
 ## :rocket: Quick Start
 
-1. Connect the Linxdot via USB-C to a Raspberry Pi (or any Linux host with `rkdeveloptool`)
-2. Put the device into Maskrom mode (erase flash or hold recovery button)
-3. Flash the image:
+1. Download the latest image from [GitHub Releases](https://github.com/SensorsIot/Linxdot-Hotspot/releases) or [Actions Artifacts](https://github.com/SensorsIot/Linxdot-Hotspot/actions)
+2. Connect the Linxdot via USB-C to a Raspberry Pi (or any Linux host with `rkdeveloptool`)
+3. Put the device into Loader/Maskrom mode (hold BT-Pair button while powering on)
+4. Flash the image:
 
 ```bash
-rkdeveloptool db rk356x_spl_loader_ddr1056_v1.10.111.bin
-# Choose one:
-xz -dk Images/crankkos-linxdotrk3566-1.0.0-pktfwd.img.xz        # UDP packet forwarder
-xz -dk Images/crankkos-linxdotrk3566-1.0.0-basicstation.img.xz   # Basics Station
-# Flash:
-rkdeveloptool wl 0 Images/crankkos-linxdotrk3566-1.0.0-pktfwd.img
-rkdeveloptool rd
+xz -dk linxdot-basics-station.img.xz
+sudo rkdeveloptool ld                    # Verify device detected
+sudo rkdeveloptool wl 0 linxdot-basics-station.img
+sudo rkdeveloptool rd                    # Reboot
 ```
 
-See [Docs/Flashing.md](Docs/Flashing.md) for the full procedure including prerequisites and troubleshooting.
+5. SSH into the device:
 
-## :wrench: Image Modifications
+```bash
+ssh root@<linxdot-ip>
+# Password: linxdot
+```
 
-The firmware is based on the original CrankkOS image with these fixes:
+See [Docs/Flashing.md](Docs/Flashing.md) for the full procedure and [Docs/BasicsStation.md](Docs/BasicsStation.md) for TTN setup.
 
-| Fix | Problem |
-|-----|---------|
-| :white_check_mark: Ethernet link detection | `mii-tool` replaced with `/sys/class/net/carrier` (RTL8211F doesn't support MII) |
-| :white_check_mark: Serial console baud rate | Getty baud changed from 115200 to 1500000 to match kernel console |
-| :white_check_mark: Docker containers | Two image variants: UDP packet forwarder (`pktfwd`) or Basics Station (`basicstation`) for TTN/ChirpStack |
-| :white_check_mark: Root password | Set to `crankk` |
-| :white_check_mark: Crontab cleanup | Removed Crankk-specific jobs |
+## :hammer_and_wrench: Building
 
-See [Docs/Linxdot.md](Docs/Linxdot.md) for full hardware documentation and image build details.
+LinxdotOS is built using Buildroot with a BR2_EXTERNAL tree:
+
+```bash
+# Clone this repo
+git clone https://github.com/SensorsIot/Linxdot-Hotspot.git
+cd Linxdot-Hotspot
+
+# Download Buildroot
+wget https://buildroot.org/downloads/buildroot-2024.02.8.tar.xz
+tar xf buildroot-2024.02.8.tar.xz
+mv buildroot-2024.02.8 buildroot
+
+# Configure and build
+cd buildroot
+make BR2_EXTERNAL=$(pwd)/.. linxdot_ld1001_defconfig
+make -j$(nproc)
+
+# Output image
+ls -lh output/images/linxdot-basics-station.img
+```
+
+See [Docs/BuildProcess.md](Docs/BuildProcess.md) for detailed build documentation.
+
+## :gear: Features
+
+| Feature | Description |
+|---------|-------------|
+| LoRa Basics Station | Secure WebSocket/TLS connection to TTN or ChirpStack |
+| Docker + Compose | Container runtime with docker-compose v2 |
+| Read-only rootfs | Ext4 with overlayfs on `/data` partition |
+| NTP time sync | Automatic time synchronization |
+| Dropbear SSH | Lightweight SSH daemon |
+| Gigabit Ethernet | DHCP client (dhcpcd) |
 
 ## :link: References
 
-- [Linxdot MinimalDocker](https://github.com/metrafonic/Linxdot-MinimalDocker) - Original flashing tools
-- [motionEyeOS](https://github.com/motioneye-project/motioneyeos) - CrankkOS is based on Calin Crisan's Buildroot platform
+- [LoRa Basics Station](https://doc.sm.tc/station) - Semtech protocol documentation
+- [TTN Gateway Guide](https://www.thethingsindustries.com/docs/gateways/) - The Things Network setup
+- [Buildroot](https://buildroot.org/) - Embedded Linux build system
 - [Rockchip RK3566](https://www.rock-chips.com/a/en/products/RK35_Series/2021/0113/1274.html)
 - [Semtech SX1302](https://www.semtech.com/products/wireless-rf/lora-core/sx1302)

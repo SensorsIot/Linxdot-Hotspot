@@ -6,7 +6,7 @@ For flashing the image, see [Flashing.md](Flashing.md).
 
 ## What You Need
 
-- Linxdot LD1001 flashed with `crankkos-linxdotrk3566-1.0.0-basicstation.img.xz`
+- Linxdot LD1001 flashed with LinxdotOS (`linxdot-basics-station.img.xz`)
 - Ethernet cable plugged into the Linxdot
 - A free account on [TTN](https://console.cloud.thethings.network/)
 
@@ -18,7 +18,7 @@ SSH into the Linxdot:
 
 ```
 ssh root@<linxdot-ip>
-Password: crankk
+Password: linxdot
 ```
 
 Then run:
@@ -62,7 +62,7 @@ SSH into the Linxdot (if not already connected):
 
 ```
 ssh root@<linxdot-ip>
-Password: crankk
+Password: linxdot
 ```
 
 Copy the config file to the writable partition and open it in the editor:
@@ -217,7 +217,7 @@ services:
 
 ### Read-Only Rootfs
 
-CrankkOS mounts the root filesystem read-only. The writable data partition is at `/data`. To modify files under `/etc`, copy them to `/data` and bind-mount them back:
+LinxdotOS mounts the root filesystem read-only. The writable data partition is at `/data`. To modify files under `/etc`, copy them to `/data` and bind-mount them back:
 
 ```
 cp /etc/docker-compose.yml /data/docker-compose.yml

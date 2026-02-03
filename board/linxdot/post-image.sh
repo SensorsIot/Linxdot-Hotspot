@@ -15,9 +15,10 @@ BOARD_DIR="${BR2_EXT}/board/linxdot"
 echo ">>> LinxdotOS post-image: BINARIES_DIR=${BINARIES_DIR}"
 
 # ── Compile boot.cmd → boot.scr ──
+# NOTE: Use -A arm (not arm64) to match vendor U-Boot 2017.09 expectations
 echo ">>> Compiling boot.scr"
 "${HOST_DIR:-$(dirname "$BINARIES_DIR")/host}/bin/mkimage" \
-    -C none -A arm64 -T script \
+    -C none -A arm -T script \
     -d "${BOARD_DIR}/boot.cmd" \
     "${BINARIES_DIR}/boot.scr"
 
