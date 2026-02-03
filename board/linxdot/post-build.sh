@@ -14,7 +14,7 @@ BR2_EXT="$2"
 BOARD_DIR="${BR2_EXT}/board/linxdot"
 BINARIES_DIR="${TARGET_DIR}/../images"
 
-echo ">>> LinxdotOS post-build: TARGET_DIR=${TARGET_DIR}"
+echo ">>> OpenLinxdot post-build: TARGET_DIR=${TARGET_DIR}"
 
 # ── Copy prebuilt kernel and DTB to BINARIES_DIR for genimage ──
 echo ">>> Copying prebuilt kernel Image and DTB"
@@ -66,4 +66,4 @@ mkdir -p "${TARGET_DIR}/var/log"
 mkdir -p "${TARGET_DIR}/var/lib"
 mkdir -p "${TARGET_DIR}/var/run"
 
-echo ">>> LinxdotOS post-build complete"
+echo ">>> OpenLinxdot post-build complete"

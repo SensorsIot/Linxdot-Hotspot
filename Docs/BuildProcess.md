@@ -1,10 +1,10 @@
-# LinxdotOS Build Process
+# OpenLinxdot Build Process
 
 Phase 1 implementation of a custom Buildroot appliance OS for the Linxdot LD1001 (RK3566).
 
 ## Overview
 
-LinxdotOS replaces the entire CrankkOS userspace with a clean Buildroot rootfs while reusing the proven bootloader, kernel, and DTB from CrankkOS. This eliminates all Helium/Crankk traces and produces a minimal Docker server running the Basics Station TTN gateway stack.
+OpenLinxdot replaces the entire CrankkOS userspace with a clean Buildroot rootfs while reusing the proven bootloader, kernel, and DTB from CrankkOS. This eliminates all Helium/Crankk traces and produces a minimal Docker server running the Basics Station TTN gateway stack.
 
 ### Boot Chain
 
@@ -99,7 +99,7 @@ Buildroot's external tree mechanism keeps all customisation outside the Buildroo
 
 ```
 name: LINXDOT
-desc: LinxdotOS - Custom Buildroot appliance OS for Linxdot LD1001
+desc: OpenLinxdot - Custom Buildroot appliance OS for Linxdot LD1001
 ```
 
 The `name` field sets the `BR2_EXTERNAL_LINXDOT_PATH` variable used throughout the config.

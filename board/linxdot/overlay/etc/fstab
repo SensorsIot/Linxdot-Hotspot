@@ -1,4 +1,4 @@
-# /etc/fstab - LinxdotOS static filesystem table
+# /etc/fstab - OpenLinxdot static filesystem table
 #
 # <device>       <mount>    <type>  <options>              <dump> <pass>
 /dev/root        /          ext4    ro,noatime             0      1

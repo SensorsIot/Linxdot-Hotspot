@@ -12,7 +12,7 @@ BINARIES_DIR="$1"
 BR2_EXT="$2"
 BOARD_DIR="${BR2_EXT}/board/linxdot"
 
-echo ">>> LinxdotOS post-image: BINARIES_DIR=${BINARIES_DIR}"
+echo ">>> OpenLinxdot post-image: BINARIES_DIR=${BINARIES_DIR}"
 
 # ── Create extlinux.conf for U-Boot ──
 # NOTE: extlinux is more reliable than boot.scr on vendor U-Boot 2017.09
@@ -63,5 +63,5 @@ dd if="${BINARIES_DIR}/boot.vfat.tmp" of="${BINARIES_DIR}/linxdot-basics-station
 
 rm -f "${BINARIES_DIR}/boot.vfat.tmp"
 
-echo ">>> LinxdotOS image: ${BINARIES_DIR}/linxdot-basics-station.img"
-echo ">>> LinxdotOS post-image complete"
+echo ">>> OpenLinxdot image: ${BINARIES_DIR}/linxdot-basics-station.img"
+echo ">>> OpenLinxdot post-image complete"

@@ -1,4 +1,4 @@
-# /etc/inittab - LinxdotOS BusyBox init configuration
+# /etc/inittab - OpenLinxdot BusyBox init configuration
 
 # Startup the system
 ::sysinit:/etc/init.d/rcS

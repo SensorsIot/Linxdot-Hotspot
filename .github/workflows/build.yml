@@ -1,4 +1,4 @@
-name: Build LinxdotOS
+name: Build OpenLinxdot
 
 on:
   push:

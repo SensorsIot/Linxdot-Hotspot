@@ -85,7 +85,7 @@ You should see:
 
 ## Basics Station
 
-LinxdotOS uses **LoRa Basics Station** to connect to TTN over WebSocket/TLS. This provides authenticated, encrypted, NAT-friendly connectivity with server-side frequency plan management.
+OpenLinxdot uses **LoRa Basics Station** to connect to TTN over WebSocket/TLS. This provides authenticated, encrypted, NAT-friendly connectivity with server-side frequency plan management.
 
 See [QuickStart.md](QuickStart.md) for complete setup instructions including TTN registration, API key configuration, and troubleshooting.
 
@@ -351,7 +351,7 @@ root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro console=ttyS2,1500000 panic=10
 
 | Component | Details |
 |-----------|---------|
-| OS | LinxdotOS (Buildroot 2024.02.8, replaces CrankkOS) |
+| OS | OpenLinxdot (Buildroot 2024.02.8, replaces CrankkOS) |
 | Kernel | Linux 5.15.104 (aarch64, prebuilt vendor binary) |
 | Compiler | aarch64-none-linux-gnu-gcc 10.3.1 (original kernel build) |
 | Init | BusyBox |

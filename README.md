@@ -12,7 +12,7 @@ Turn your **Linxdot LD1001** into a **LoRaWAN gateway** for [The Things Network]
 
 ## What is This?
 
-LinxdotOS is a custom firmware that connects your Linxdot hotspot to TTN (The Things Network) using the secure Basics Station protocol. No cloud subscriptions, no monthly fees — just a working LoRa gateway.
+OpenLinxdot is a custom firmware that connects your Linxdot hotspot to TTN (The Things Network) using the secure Basics Station protocol. No cloud subscriptions, no monthly fees — just a working LoRa gateway.
 
 ## Get Started
 
@@ -60,7 +60,7 @@ That's it. Your gateway is now on TTN.
 Building from source or repurposing the hardware for other projects?
 
 - [Hardware Reference](Docs/Hardware.md) — GPIO pinouts, serial console, technical specs
-- [Build Process](Docs/BuildProcess.md) — Compiling LinxdotOS from source
+- [Build Process](Docs/BuildProcess.md) — Compiling OpenLinxdot from source
 
 ### Tech Stack
 

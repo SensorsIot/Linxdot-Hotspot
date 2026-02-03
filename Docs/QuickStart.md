@@ -1,4 +1,4 @@
-# LinxdotOS Quick Start
+# OpenLinxdot Quick Start
 
 Get your Linxdot LD1001 connected to The Things Network in 10 minutes.
 
@@ -192,4 +192,4 @@ picocom -b 1500000 /dev/ttyUSB0
 ## Next Steps
 
 - [Hardware Reference](Hardware.md) — GPIO pinouts, serial console wiring, technical specs
-- [Build Process](BuildProcess.md) — Building LinxdotOS from source
+- [Build Process](BuildProcess.md) — Building OpenLinxdot from source
