@@ -30,10 +30,16 @@ docker logs basicstation 2>&1 | grep "gateway EUI"
 You will see something like:
 
 ```
-gateway EUI `C66A7BFFFE21C779` is not registered
+Gateway EUI: 0016C001F140B34D
 ```
 
-Write down the EUI between the backticks. You need it in the next step.
+or
+
+```
+gateway EUI `0016C001F140B34D` is not registered
+```
+
+Write down the EUI (16 hex characters). You need it in the next step.
 
 ## Step 2: Register the Gateway on TTN
 
@@ -86,19 +92,18 @@ Replace `${TC_KEY}` with your actual key. It should look like:
 
 Save and exit (`Esc`, then `:wq`).
 
-Now activate the new config:
+The init script automatically uses `/data/docker-compose.yml` if it exists, so your settings will persist across reboots.
+
+## Step 5: Restart the Container
+
+Restart the basicstation container to apply the new API key:
 
 ```
-mount -o bind /data/docker-compose.yml /etc/docker-compose.yml
-docker rm -f basicstation
-cd /etc && docker-compose up -d
+docker-compose -f /data/docker-compose.yml down
+docker-compose -f /data/docker-compose.yml up -d
 ```
 
-## Step 5: Power Cycle the Linxdot
-
-**Unplug the Linxdot power cable, wait 5 seconds, plug it back in.**
-
-This resets the LoRa radio chip. Without this power cycle, the radio will not start.
+The init script automatically resets the LoRa concentrator before starting the container. If you see errors about the concentrator not initializing, power cycle the Linxdot (unplug power, wait 5 seconds, replug).
 
 ## Step 6: Check That It Works
 
@@ -131,33 +136,13 @@ If you are not in Europe, edit `/data/docker-compose.yml` and change `TTS_REGION
 Then restart:
 
 ```
-mount -o bind /data/docker-compose.yml /etc/docker-compose.yml
-docker rm -f basicstation
-cd /etc && docker-compose up -d
+docker-compose -f /data/docker-compose.yml down
+docker-compose -f /data/docker-compose.yml up -d
 ```
 
-Power cycle the Linxdot after changing the region.
+## Settings Persistence
 
-## Keeping Your Settings After a Reboot
-
-The config change from Step 4 is lost when the Linxdot reboots. To make it permanent, run this once:
-
-```
-cat > /data/S99basicstation << 'EOF'
-#!/bin/sh
-case "$1" in
-    start)
-        if [ -f /data/docker-compose.yml ]; then
-            mount -o bind /data/docker-compose.yml /etc/docker-compose.yml
-        fi
-        ;;
-esac
-EOF
-chmod +x /data/S99basicstation
-mount -o bind /data/S99basicstation /etc/init.d/S99basicstation
-```
-
-After this, your API key will survive reboots.
+Your `/data/docker-compose.yml` is automatically used by the init script on every boot. Settings persist across reboots without any additional setup.
 
 ## Troubleshooting
 
@@ -185,7 +170,6 @@ After this, your API key will survive reboots.
 The image ships with this `/etc/docker-compose.yml`:
 
 ```yaml
-version: '3'
 services:
   basicstation:
     image: xoseperez/basicstation:latest
@@ -217,15 +201,16 @@ services:
 
 ### Read-Only Rootfs
 
-LinxdotOS mounts the root filesystem read-only. The writable data partition is at `/data`. To modify files under `/etc`, copy them to `/data` and bind-mount them back:
+LinxdotOS mounts the root filesystem read-only. The writable data partition is at `/data`.
+
+The init script `/etc/init.d/S80dockercompose` automatically checks for `/data/docker-compose.yml` and uses it if present, otherwise falls back to `/etc/docker-compose.yml`. Simply copy and edit the config:
 
 ```
 cp /etc/docker-compose.yml /data/docker-compose.yml
 vi /data/docker-compose.yml
-mount -o bind /data/docker-compose.yml /etc/docker-compose.yml
 ```
 
-Bind mounts are lost on reboot. The init script in "Keeping Your Settings After a Reboot" makes them permanent by running the mount at boot time via `/etc/init.d/S99basicstation`.
+Your changes persist across reboots automatically.
 
 ### Concentrator Reset (GPIO)
 
@@ -239,9 +224,9 @@ The SX1302 LoRa concentrator on the Linxdot requires three GPIOs to be toggled i
 
 The sequence is: power off (GPIOs 23+17 low), wait, power on (GPIOs 23+17 high), wait, then pulse reset (GPIO 15 high then low).
 
-The existing script `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot` performs this sequence and is used by the UDP packet forwarder image. However, the `xoseperez/basicstation` container cannot reliably execute GPIO resets from inside the container on this hardware, because the container's shell does not properly handle the required sleep delays during `STATION_RADIOINIT` execution.
+The script `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot` performs this sequence. LinxdotOS runs this script automatically via `/etc/init.d/S80dockercompose` before starting the basicstation container.
 
-The workaround is to **power cycle the entire board**, which resets all GPIOs to their default state and allows the concentrator to initialize cleanly on the next boot.
+If the automatic reset fails (e.g., EUI shows as derived from eth0 instead of the chip), **power cycle the entire board** to reset all GPIOs to their default state.
 
 ### Gateway EUI
 
