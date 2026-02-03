@@ -87,7 +87,7 @@ You should see:
 
 LinxdotOS uses **LoRa Basics Station** to connect to TTN over WebSocket/TLS. This provides authenticated, encrypted, NAT-friendly connectivity with server-side frequency plan management.
 
-See [BasicsStation.md](BasicsStation.md) for complete setup instructions including TTN registration, API key configuration, and troubleshooting.
+See [QuickStart.md](QuickStart.md) for complete setup instructions including TTN registration, API key configuration, and troubleshooting.
 
 ## System on Chip
 
@@ -426,7 +426,7 @@ xz -9 crankkos-linxdotrk3566-1.0.0.img
 
 The resulting file keeps the original filename but contains the fixes above.
 The uncompressed image is a raw disk image (3 partitions) written directly to
-eMMC via `rkdeveloptool wl 0`. See `Docs/Flashing.md` for the full procedure.
+eMMC via `rkdeveloptool wl 0`. See [QuickStart.md](QuickStart.md) for the flashing procedure.
 
 ## References
 

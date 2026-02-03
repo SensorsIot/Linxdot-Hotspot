@@ -341,7 +341,7 @@ ssh pi@192.168.0.41 '
 
 **Note:** When flashing in Loader mode (not Maskrom), there is no need to download a separate SPL loader binary — `rkdeveloptool wl 0` writes the entire image including the idbloader region.
 
-See [Flashing.md](Flashing.md) for the full procedure.
+See [QuickStart.md](QuickStart.md) for the full flashing procedure.
 
 ## Step 11: GitHub Actions CI
 
