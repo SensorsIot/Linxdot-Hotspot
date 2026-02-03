@@ -30,7 +30,8 @@ jobs:
             xz-utils git \
             bison flex gawk gettext texinfo \
             device-tree-compiler dosfstools mtools \
-            libssl-dev
+            libssl-dev \
+            u-boot-tools
 
       - name: Cache Buildroot downloads
         uses: actions/cache@v4
