@@ -4,8 +4,15 @@ buildroot/
 # WiFi firmware (not committed due to licensing)
 board/linxdot/firmware/
 
-# Claude Code data persistence
+# AI assistants and agents
+.claude/
 .claude-data/
+.cursor/
+.github/copilot/
+.aider*
+.continue/
+.codeium/
+.tabnine/
 
 # Editor and OS files
 *.swp
