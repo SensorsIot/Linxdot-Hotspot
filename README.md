@@ -1,5 +1,13 @@
 # Linxdot LoRa Gateway
 
+[![Build](https://github.com/SensorsIot/Linxdot-Hotspot/actions/workflows/build.yml/badge.svg)](https://github.com/SensorsIot/Linxdot-Hotspot/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/SensorsIot/Linxdot-Hotspot?include_prereleases)](https://github.com/SensorsIot/Linxdot-Hotspot/releases)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+![LoRaWAN](https://img.shields.io/badge/LoRaWAN-Gateway-green)
+![TTN](https://img.shields.io/badge/TTN-Compatible-blue)
+![Platform](https://img.shields.io/badge/Platform-Linxdot_LD1001-orange)
+
 Turn your **Linxdot LD1001** into a **LoRaWAN gateway** for [The Things Network](https://www.thethingsnetwork.org/).
 
 ## What is This?
@@ -53,6 +61,14 @@ Building from source or repurposing the hardware for other projects?
 
 - [Hardware Reference](Docs/Hardware.md) — GPIO pinouts, serial console, technical specs
 - [Build Process](Docs/BuildProcess.md) — Compiling LinxdotOS from source
+
+### Tech Stack
+
+![Buildroot](https://img.shields.io/badge/Buildroot-2024.02-yellow)
+![Kernel](https://img.shields.io/badge/Kernel-5.15.104-blue)
+![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?logo=docker&logoColor=white)
+![SX1302](https://img.shields.io/badge/LoRa-SX1302-green)
+![RK3566](https://img.shields.io/badge/SoC-RK3566-red)
 
 ## License
 
