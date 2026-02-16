@@ -19,3 +19,4 @@ board/linxdot/firmware/
 *.swo
 *~
 .DS_Store
+CLAUDE.md
