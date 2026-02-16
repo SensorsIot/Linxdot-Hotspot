@@ -52,3 +52,4 @@ USER ${USERNAME}
 
 # Set default working directory for SSH logins
 WORKDIR /workspaces/Linxdot-Hotspot
+RUN echo 'cd /workspaces/Linxdot-Hotspot 2>/dev/null' >> /home/dev/.bashrc
