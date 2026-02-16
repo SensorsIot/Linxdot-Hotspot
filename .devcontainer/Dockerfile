@@ -49,3 +49,6 @@ RUN echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} && \
     chmod 0440 /etc/sudoers.d/${USERNAME}
 
 USER ${USERNAME}
+
+# Set default working directory for SSH logins
+WORKDIR /workspaces/Linxdot-Hotspot
