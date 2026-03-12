@@ -2,10 +2,10 @@ name: Build OpenLinxdot
 
 on:
   push:
-    branches: [ourOS]
+    branches: [main]
     tags: ['v*']
   pull_request:
-    branches: [ourOS]
+    branches: [main]
   workflow_dispatch:
 
 env:
