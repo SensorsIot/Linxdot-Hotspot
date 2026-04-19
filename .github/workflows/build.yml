@@ -16,7 +16,57 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check shell scripts
+        run: |
+          echo "Checking shell scripts for syntax errors..."
+          errors=0
+          for f in board/linxdot/overlay/etc/init.d/S*; do
+            if ! bash -n "$f" 2>&1; then
+              echo "FAIL: $f"
+              errors=$((errors + 1))
+            else
+              echo "  OK: $f"
+            fi
+          done
+          if [ "$errors" -gt 0 ]; then
+            echo "ERROR: $errors script(s) have syntax errors"
+            exit 1
+          fi
+
+      - name: Check defconfig exists
+        run: |
+          if [ ! -f configs/linxdot_ld1001_defconfig ]; then
+            echo "ERROR: defconfig not found"
+            exit 1
+          fi
+          echo "defconfig OK ($(wc -l < configs/linxdot_ld1001_defconfig) lines)"
+
+      - name: Check overlay structure
+        run: |
+          for f in board/linxdot/overlay/etc/init.d/S00datapart \
+                   board/linxdot/overlay/etc/init.d/S40network \
+                   board/linxdot/overlay/etc/init.d/S50sshd \
+                   board/linxdot/overlay/etc/init.d/S60dockerd \
+                   board/linxdot/overlay/etc/init.d/S80dockercompose \
+                   board/linxdot/genimage.cfg \
+                   board/linxdot/post-build.sh \
+                   board/linxdot/post-image.sh; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: missing $f"
+              exit 1
+            fi
+          done
+          echo "Overlay structure OK"
+
   build:
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
@@ -117,7 +167,6 @@ jobs:
           retention-days: 30
 
       - name: Create release
-        # Only create releases for tags on the main repo (not forks)
         if: |
           startsWith(github.ref, 'refs/tags/v') &&
           github.repository == 'SensorsIot/Linxdot-Hotspot'
