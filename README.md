@@ -48,6 +48,7 @@ That's it. Your gateway is now on TTN.
 - Works behind NAT/firewalls
 - Frequency plan downloaded from server
 - Survives reboots — just add your key once
+- Persistent MAC address derived from hardware (stable DHCP leases across reflashes)
 - EU868, US915, AU915, and other regions supported
 
 ## Support

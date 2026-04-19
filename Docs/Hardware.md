@@ -206,6 +206,8 @@ Regulated supplies from RK809:
 
 **Note:** The RTL8211F PHY does not support the legacy `mii-tool` interface. Link detection must use `/sys/class/net/eth0/carrier` or `ethtool`.
 
+**MAC address:** The RK3566 DWMAC has no factory-burned MAC address. OpenLinxdot derives a persistent, locally-administered MAC from the eMMC CID hash (see `S40network`). Each device gets a unique, stable MAC that survives reflashing.
+
 ## WiFi + Bluetooth
 
 | Property | Value |

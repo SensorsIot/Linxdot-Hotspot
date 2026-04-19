@@ -242,11 +242,14 @@ Also mounts cgroupfs (cgroup2 on kernel 5.x) and bind-mounts `/data/docker-compo
 
 **Lesson learned:** Without `/var/run` as tmpfs, both `dhcpcd` and `dropbear` fail to create their PID files and socket directories, preventing networking and SSH.
 
-#### S40network — Ethernet DHCP
+#### S40network — Ethernet MAC and DHCP
 
-1. Brings up loopback
-2. Brings up `eth0` and waits up to 30 seconds for carrier (link detect via `/sys/class/net/eth0/carrier`)
-3. Starts `dhcpcd -b eth0` for background DHCP
+1. Derives a persistent MAC address from the eMMC CID (hardware-unique, stable across reflashes)
+2. Brings up loopback
+3. Brings up `eth0` and waits up to 30 seconds for carrier (link detect via `/sys/class/net/eth0/carrier`)
+4. Starts `dhcpcd -b eth0` for background DHCP
+
+The RK3566 DWMAC has no factory-burned MAC address — without this step, the kernel generates a random MAC on each boot, causing DHCP lease churn. The MAC is derived by hashing `/sys/class/mmc_host/mmc1/mmc1:0001/cid` with md5sum and setting the locally-administered bit.
 
 #### S50sshd — Dropbear SSH
 
@@ -345,21 +348,32 @@ See [QuickStart.md](QuickStart.md) for the full flashing procedure.
 
 ## Step 11: GitHub Actions CI
 
-`.github/workflows/build.yml` runs on push to `ourOS` and on tags.
+`.github/workflows/build.yml` uses a split build architecture to avoid a full 1-hour Buildroot rebuild for every change.
 
-**Caching:**
+### Jobs
+
+| Job | Trigger | Duration | Purpose |
+|-----|---------|----------|---------|
+| `validate` | Every push, PR | ~30s | Shell syntax checks, defconfig and overlay structure |
+| `detect-changes` | Every push to main | ~30s | Hashes base-affecting files, compares to stored hash |
+| `base-build` | Auto (when base files change) | ~1h | Full Buildroot build, uploads `rootfs.tar.xz` + host tools to `base-latest` release |
+| `release` | Tag `v*`, manual dispatch | ~3 min | Downloads cached base, applies overlay, assembles image, creates GitHub release |
+
+### How it works
+
+The base rootfs (toolchain + all packages) rarely changes — only when `defconfig`, `package/`, `external.mk`, `Config.in`, or `external.desc` are modified. The `detect-changes` job computes a SHA-256 hash of these files and compares it to the hash stored in the `base-latest` GitHub release. If they differ, `base-build` runs automatically.
+
+The `base-build` job produces a clean `rootfs.tar` (without overlay or post-build scripts) and uploads it as a prerelease called `base-latest`, along with the `genimage` host binary.
+
+The `release` job downloads this cached base, applies the overlay with `rsync`, runs `post-build.sh` (kernel, DTB, modules), creates `rootfs.ext4`, and runs `post-image.sh` (genimage + extlinux). This takes ~3 minutes instead of 1 hour.
+
+A `concurrency` group ensures only one build runs per branch at a time — newer pushes cancel older in-progress runs.
+
+### Caching
+
 - `buildroot/dl/` — source tarballs (avoids re-downloading ~1 GB)
 - `~/.buildroot-ccache` — compiler cache (speeds up rebuilds)
-
-**Build steps:**
-1. Checkout with LFS
-2. Install build dependencies
-3. Download and extract Buildroot (with cache-aware logic, see caveat below)
-4. `make BR2_EXTERNAL=.. linxdot_ld1001_defconfig`
-5. `make -j$(nproc)`
-6. Compress with `xz -9 -T0`
-7. Upload as GitHub Actions artifact (30-day retention)
-8. On tag push (`v*`): create GitHub Release with the image attached
+- `base-latest` release — cached rootfs + host tools (avoids full rebuilds for overlay changes)
 
 **Lesson learned (CI caching):** The `buildroot/dl/` cache creates the `buildroot/` parent directory as a side effect. A naive `if [ ! -d buildroot ]` check then skips the Buildroot download, leaving an empty directory with no Makefile. The fix is to check `if [ ! -f buildroot/Makefile ]` and use `rsync` to merge the extracted Buildroot into the existing directory (preserving the cached `dl/` contents).
 
