@@ -7,11 +7,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      force_base_build:
-        description: 'Force a base rootfs rebuild'
-        type: boolean
-        default: false
 
 env:
   BUILDROOT_VERSION: "2024.02.8"
@@ -73,10 +68,8 @@ jobs:
   # ── Detect if base-affecting files changed ──
   detect-changes:
     runs-on: ubuntu-22.04
-    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
     outputs:
       base_changed: ${{ steps.check.outputs.changed }}
-      base_hash: ${{ steps.check.outputs.current_hash }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -96,7 +89,6 @@ jobs:
             package/docker-compose-v1/docker-compose-v1.mk \
             2>/dev/null | sha256sum | cut -d' ' -f1)
           echo "Current base hash: $CURRENT_HASH"
-          echo "current_hash=$CURRENT_HASH" >> "$GITHUB_OUTPUT"
 
           # Get stored hash from latest base release
           STORED_HASH=$(gh release view base-latest --json body -q '.body' 2>/dev/null \
@@ -117,8 +109,7 @@ jobs:
     if: |
       always() &&
       needs.validate.result == 'success' &&
-      (needs.detect-changes.outputs.base_changed == 'true' ||
-       (github.event_name == 'workflow_dispatch' && inputs.force_base_build))
+      needs.detect-changes.outputs.base_changed == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
@@ -191,10 +182,8 @@ jobs:
 
       - name: Bundle host tools
         run: |
-          # Save genimage and dependencies for the release job
           mkdir -p host-tools/bin host-tools/lib
           cp buildroot/output/host/bin/genimage host-tools/bin/
-          # Copy shared libraries genimage needs
           for lib in $(ldd buildroot/output/host/bin/genimage | grep -oP '/\S+'); do
             cp "$lib" host-tools/lib/ 2>/dev/null || true
           done
@@ -217,11 +206,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Delete old base-latest release if it exists
           gh release delete base-latest --yes 2>/dev/null || true
           git push origin :refs/tags/base-latest 2>/dev/null || true
 
-          # Create new base-latest release with hash in body
           gh release create base-latest \
             --title "Base rootfs ($(date -u +%Y-%m-%d))" \
             --notes "BASE_HASH=${{ steps.hash.outputs.hash }}" \
@@ -229,10 +216,14 @@ jobs:
             buildroot/output/images/rootfs.tar.xz \
             host-tools.tar.gz
 
-  # ── Fast release (~2-3 min) — assembles overlay on cached base ──
+  # ── Fast image assembly (~2-3 min) — on tags, manual dispatch, or after base-build ──
   release:
-    needs: validate
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [validate, detect-changes, base-build]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.base-build.result == 'success' || needs.base-build.result == 'skipped') &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
@@ -246,7 +237,7 @@ jobs:
         run: |
           echo "Downloading base rootfs from base-latest release..."
           gh release download base-latest -p 'rootfs.tar.xz' -p 'host-tools.tar.gz' -D /tmp/base/ \
-            || { echo "ERROR: No base release found. Run workflow_dispatch with force_base_build first."; exit 1; }
+            || { echo "ERROR: No base release found. Push a change to defconfig or package/ to trigger a base build."; exit 1; }
           ls -lh /tmp/base/
 
       - name: Install host tools
@@ -254,7 +245,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dosfstools mtools u-boot-tools e2fsprogs
 
-          # Install genimage from base build
           mkdir -p /tmp/host-tools
           tar xzf /tmp/base/host-tools.tar.gz -C /tmp/host-tools
           sudo cp /tmp/host-tools/bin/genimage /usr/local/bin/
@@ -263,31 +253,25 @@ jobs:
 
       - name: Assemble image
         run: |
-          # Set up directory structure matching Buildroot layout
           mkdir -p work/target work/images work/build
 
-          # Extract base rootfs
           echo ">>> Extracting base rootfs..."
           tar xf /tmp/base/rootfs.tar.xz -C work/target/
 
-          # Apply overlay
           echo ">>> Applying overlay..."
           rsync -a board/linxdot/overlay/ work/target/
 
-          # Run post-build.sh (copies kernel, DTB, blobs, modules)
           echo ">>> Running post-build.sh..."
           chmod +x board/linxdot/post-build.sh
           ./board/linxdot/post-build.sh work/target "$(pwd)"
 
-          # Create rootfs.ext4
           echo ">>> Creating rootfs.ext4..."
           SIZE_KB=$(du -sk work/target/ | cut -f1)
-          SIZE_MB=$(( (SIZE_KB / 1024) + 50 ))  # Add 50MB headroom
+          SIZE_MB=$(( (SIZE_KB / 1024) + 50 ))
           [ "$SIZE_MB" -lt 500 ] && SIZE_MB=500
           sudo mke2fs -d work/target -t ext4 -r 1 -N 0 -m 0 -L rootfs \
             work/images/rootfs.ext4 "${SIZE_MB}M"
 
-          # Run post-image.sh (genimage + extlinux + mtools patching)
           echo ">>> Running post-image.sh..."
           chmod +x board/linxdot/post-image.sh
           ./board/linxdot/post-image.sh work/images "$(pwd)"
@@ -331,7 +315,9 @@ jobs:
           retention-days: 30
 
       - name: Create release
-        if: github.repository == 'SensorsIot/Linxdot-Hotspot'
+        if: |
+          startsWith(github.ref, 'refs/tags/v') &&
+          github.repository == 'SensorsIot/Linxdot-Hotspot'
         uses: softprops/action-gh-release@v2
         with:
           files: work/images/linxdot-basics-station.img.xz
