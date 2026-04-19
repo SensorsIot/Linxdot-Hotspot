@@ -166,14 +166,20 @@ jobs:
           make BR2_EXTERNAL="$(pwd)/.." linxdot_ld1001_defconfig
 
           # Enable tar output, disable overlay and scripts (applied in release job)
-          cat >> output/.config << 'PATCH'
-          BR2_TARGET_ROOTFS_TAR=y
-          BR2_ROOTFS_OVERLAY=""
-          BR2_ROOTFS_POST_BUILD_SCRIPT=""
-          BR2_ROOTFS_POST_IMAGE_SCRIPT=""
-          BR2_ROOTFS_POST_SCRIPT_ARGS=""
-          PATCH
+          # Remove any existing entries first, then append the new ones
+          sed -i '/^BR2_TARGET_ROOTFS_TAR/d' output/.config
+          sed -i '/^# BR2_TARGET_ROOTFS_TAR is not set/d' output/.config
+          sed -i '/^BR2_ROOTFS_OVERLAY=/d' output/.config
+          sed -i '/^BR2_ROOTFS_POST_BUILD_SCRIPT=/d' output/.config
+          sed -i '/^BR2_ROOTFS_POST_IMAGE_SCRIPT=/d' output/.config
+          sed -i '/^BR2_ROOTFS_POST_SCRIPT_ARGS=/d' output/.config
+          printf 'BR2_TARGET_ROOTFS_TAR=y\nBR2_TARGET_ROOTFS_TAR_NONE=y\nBR2_ROOTFS_OVERLAY=""\nBR2_ROOTFS_POST_BUILD_SCRIPT=""\nBR2_ROOTFS_POST_IMAGE_SCRIPT=""\nBR2_ROOTFS_POST_SCRIPT_ARGS=""\n' >> output/.config
           make olddefconfig
+
+          # Verify the config took effect
+          echo "=== Rootfs format settings ==="
+          grep -E '^BR2_TARGET_ROOTFS_(TAR|EXT)' output/.config || true
+          grep -E '^BR2_ROOTFS_(OVERLAY|POST)' output/.config || true
 
           mkdir -p ~/.buildroot-ccache
           make -j$(nproc)
