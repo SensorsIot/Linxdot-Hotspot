@@ -8,6 +8,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BUILDROOT_VERSION: "2024.02.8"
   BUILDROOT_SHA256: "cbccfdf8483304b558f71de856867bf16e0ac542302423f6ae2217f751edee18"
