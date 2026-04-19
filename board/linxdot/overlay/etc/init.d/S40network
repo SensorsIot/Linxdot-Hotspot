@@ -4,12 +4,34 @@
 #
 
 LINK_TIMEOUT=30
+CID_PATH="/sys/class/mmc_host/mmc1/mmc1:0001/cid"
+
+set_mac() {
+    cid=$(cat "$CID_PATH" 2>/dev/null)
+    if [ -z "$cid" ]; then
+        echo "S40network: no eMMC CID found, using random MAC"
+        return
+    fi
+    hash=$(echo "$cid" | md5sum | cut -c1-12)
+    b1=$(echo "$hash" | cut -c1-2)
+    b2=$(echo "$hash" | cut -c3-4)
+    b3=$(echo "$hash" | cut -c5-6)
+    b4=$(echo "$hash" | cut -c7-8)
+    b5=$(echo "$hash" | cut -c9-10)
+    b6=$(echo "$hash" | cut -c11-12)
+    # Set locally-administered + unicast bits on first byte
+    b1=$(printf "%02x" $(( 0x$b1 & 0xfe | 0x02 )))
+    mac="$b1:$b2:$b3:$b4:$b5:$b6"
+    ip link set dev eth0 address "$mac"
+    echo "S40network: eth0 MAC set to $mac (from eMMC CID)"
+}
 
 start_lo() {
     ifconfig lo up
 }
 
 start_eth() {
+    set_mac
     echo "S40network: waiting for eth0 link"
     ifconfig eth0 up
 
