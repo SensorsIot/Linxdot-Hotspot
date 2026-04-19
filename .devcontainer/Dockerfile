@@ -48,6 +48,13 @@ RUN if id -u vscode >/dev/null 2>&1; then \
 RUN echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} && \
     chmod 0440 /etc/sudoers.d/${USERNAME}
 
+# SSH quiet config
+RUN mkdir -p /home/${USERNAME}/.ssh \
+    && printf 'Host *\n    StrictHostKeyChecking accept-new\n    LogLevel ERROR\n' > /home/${USERNAME}/.ssh/config \
+    && chmod 700 /home/${USERNAME}/.ssh \
+    && chmod 600 /home/${USERNAME}/.ssh/config \
+    && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.ssh
+
 USER ${USERNAME}
 
 # Set default working directory for SSH logins
