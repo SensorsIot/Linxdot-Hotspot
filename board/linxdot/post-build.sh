@@ -22,9 +22,11 @@ cp "${BOARD_DIR}/blobs/Image" "${BINARIES_DIR}/"
 cp "${BOARD_DIR}/blobs/rk3566-linxdot.dtb" "${BINARIES_DIR}/"
 
 # ── Copy boot blobs for genimage ──
-echo ">>> Copying boot blobs (idbloader, u-boot.itb)"
-cp "${BOARD_DIR}/blobs/idbloader.img" "${BINARIES_DIR}/"
-cp "${BOARD_DIR}/blobs/u-boot.itb" "${BINARIES_DIR}/"
+# When Buildroot builds U-Boot from source (Phase 3), idbloader.img and
+# u-boot.itb already exist in BINARIES_DIR — don't overwrite with stale blobs.
+echo ">>> Ensuring boot blobs present in BINARIES_DIR"
+[ -f "${BINARIES_DIR}/idbloader.img" ] || cp "${BOARD_DIR}/blobs/idbloader.img" "${BINARIES_DIR}/"
+[ -f "${BINARIES_DIR}/u-boot.itb" ] || cp "${BOARD_DIR}/blobs/u-boot.itb" "${BINARIES_DIR}/"
 
 # ── Install kernel modules ──
 echo ">>> Installing kernel modules to rootfs"
@@ -65,5 +67,17 @@ mkdir -p "${TARGET_DIR}/data"
 mkdir -p "${TARGET_DIR}/var/log"
 mkdir -p "${TARGET_DIR}/var/lib"
 mkdir -p "${TARGET_DIR}/var/run"
+
+# ── Write /etc/os-release (VERSION_ID consumed by ota-check) ──
+OS_VERSION="${OS_VERSION:-dev}"
+echo ">>> Setting os-release VERSION_ID=${OS_VERSION}"
+cat > "${TARGET_DIR}/etc/os-release" <<EOF
+NAME="OpenLinxdot"
+ID=openlinxdot
+PRETTY_NAME="OpenLinxdot ${OS_VERSION}"
+VERSION="${OS_VERSION}"
+VERSION_ID=${OS_VERSION}
+HOME_URL="https://github.com/SensorsIot/Linxdot-Hotspot"
+EOF
 
 echo ">>> OpenLinxdot post-build complete"

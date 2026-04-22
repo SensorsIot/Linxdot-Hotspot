@@ -1,0 +1,29 @@
+# Linxdot LD1001 U-Boot config fragment
+#
+# Layered on top of quartz64-a-rk3566_defconfig to add:
+#   - 1,500,000 baud console (matches vendor DTB stdout-path)
+#   - Writable env in dedicated MMC region at 14 MiB
+#   - CONFIG_BOOTCOUNT_LIMIT for automatic rollback via altbootcmd
+#   - Slot-aware bootcmd picking boot partition from ${boot_slot}
+#
+# Env offsets MUST stay in sync with board/linxdot/overlay/etc/fw_env.config
+# and the uboot_env partition in board/linxdot/genimage.cfg.
+
+CONFIG_BAUDRATE=1500000
+
+CONFIG_ENV_IS_IN_MMC=y
+CONFIG_SYS_MMC_ENV_DEV=0
+CONFIG_SYS_MMC_ENV_PART=0
+CONFIG_ENV_OFFSET=0xE00000
+CONFIG_ENV_SIZE=0x10000
+CONFIG_ENV_OFFSET_REDUND=0xE10000
+
+CONFIG_BOOTCOUNT_LIMIT=y
+CONFIG_BOOTCOUNT_ENV=y
+
+CONFIG_CMD_SETEXPR=y
+CONFIG_CMD_SAVEENV=y
+CONFIG_CMD_SOURCE=y
+
+CONFIG_USE_BOOTCOMMAND=y
+CONFIG_BOOTCOMMAND="if test \"${boot_slot}\" = \"B\"; then setenv bootpart 3; else setenv bootpart 1; fi; load mmc 0:${bootpart} ${scriptaddr} boot.scr && source ${scriptaddr}"
