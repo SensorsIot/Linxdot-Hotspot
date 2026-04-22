@@ -1,0 +1,74 @@
+#!/bin/sh
+# /usr/sbin/ota-check — check for and apply an OpenLinxdot OTA update.
+#
+# Flow: fetch manifest.json from GitHub Releases → compare versions → download
+# the .swu → hand to SWUpdate, which writes to the INACTIVE slot and sets
+# upgrade_available=1 / boot_slot=<target> in the U-Boot env → reboot.
+# On reboot, U-Boot trial-boots the new slot; S98confirm commits if healthy,
+# U-Boot rolls back if it exceeds bootlimit attempts.
+#
+# Refuses to run while the current slot is still in trial mode.
+
+set -e
+
+MANIFEST_URL="${OTA_MANIFEST_URL:-https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json}"
+PUBKEY="${OTA_PUBKEY:-/etc/swupdate/public.pem}"
+
+log() { logger -t ota "$*"; echo "ota: $*"; }
+die() { log "error: $*"; exit 1; }
+
+UPGRADE_AVAILABLE=$(fw_printenv -n upgrade_available 2>/dev/null || echo "0")
+if [ "$UPGRADE_AVAILABLE" = "1" ]; then
+    die "current slot not committed (upgrade_available=1) — wait for S98confirm"
+fi
+
+CURRENT_SLOT=$(fw_printenv -n boot_slot 2>/dev/null || echo "A")
+if [ "$CURRENT_SLOT" = "A" ]; then TARGET_SLOT=B; else TARGET_SLOT=A; fi
+
+MANIFEST=/tmp/ota-manifest.json
+log "fetching $MANIFEST_URL"
+curl -fsS --max-time 30 -L "$MANIFEST_URL" -o "$MANIFEST" \
+    || die "could not fetch manifest"
+
+REMOTE_VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST")
+REMOTE_URL=$(    sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'     "$MANIFEST")
+REMOTE_SHA=$(    sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'  "$MANIFEST")
+
+[ -n "$REMOTE_VERSION" ] || die "manifest missing version"
+[ -n "$REMOTE_URL" ]     || die "manifest missing url"
+
+CURRENT_VERSION=$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-unknown}")
+log "current=$CURRENT_VERSION remote=$REMOTE_VERSION active=$CURRENT_SLOT target=$TARGET_SLOT"
+
+if [ "$REMOTE_VERSION" = "$CURRENT_VERSION" ]; then
+    log "already up to date"
+    exit 0
+fi
+
+SWU=/tmp/update.swu
+rm -f "$SWU"
+log "downloading $REMOTE_URL"
+curl -fsS --max-time 600 -L "$REMOTE_URL" -o "$SWU" \
+    || die "download failed"
+
+if [ -n "$REMOTE_SHA" ]; then
+    GOT=$(sha256sum "$SWU" | cut -d' ' -f1)
+    [ "$GOT" = "$REMOTE_SHA" ] || die "sha256 mismatch (manifest=$REMOTE_SHA got=$GOT)"
+fi
+
+log "applying to slot $TARGET_SLOT"
+SWUPDATE_ARGS="-v -i $SWU -e stable,linxdot-ld1001,target-${TARGET_SLOT}"
+if [ -f "$PUBKEY" ]; then
+    SWUPDATE_ARGS="$SWUPDATE_ARGS -k $PUBKEY"
+else
+    log "WARNING: no public key at $PUBKEY — signature verification disabled"
+fi
+
+# shellcheck disable=SC2086
+swupdate $SWUPDATE_ARGS || { rm -f "$SWU"; die "swupdate rejected bundle"; }
+
+rm -f "$SWU"
+log "update staged, rebooting into slot $TARGET_SLOT"
+sync
+sleep 2
+reboot

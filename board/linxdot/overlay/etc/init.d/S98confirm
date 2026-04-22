@@ -1,0 +1,36 @@
+#!/bin/sh
+# S98confirm — commit the current slot after a healthy trial boot.
+#
+# If upgrade_available=1 (we're trial-booting a newly-applied update),
+# wait for Docker + basicstation to come up, then clear the trial flags.
+# Otherwise U-Boot will roll us back on next reboot.
+
+case "$1" in
+    start) ;;
+    stop|*) exit 0 ;;
+esac
+
+[ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ] || exit 0
+
+SLOT=$(fw_printenv -n boot_slot 2>/dev/null || echo "?")
+logger -t ota "trial boot of slot $SLOT — waiting up to 120s for services"
+
+HEALTHY=0
+for _ in $(seq 1 24); do
+    if pgrep dockerd >/dev/null 2>&1 \
+       && docker ps --format '{{.Names}}' 2>/dev/null | grep -q basicstation; then
+        HEALTHY=1
+        break
+    fi
+    sleep 5
+done
+
+if [ "$HEALTHY" -eq 1 ]; then
+    fw_setenv upgrade_available 0
+    fw_setenv bootcount 0
+    logger -t ota "slot $SLOT committed"
+else
+    logger -t ota "slot $SLOT health check FAILED — rollback on next reboot"
+fi
+
+exit 0
