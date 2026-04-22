@@ -1,0 +1,64 @@
+software =
+{
+    version = "@VERSION@";
+    description = "OpenLinxdot firmware update";
+    hardware-compatibility: [ "linxdot-ld1001" ];
+
+    stable:
+    {
+        linxdot-ld1001:
+        {
+            /* Invoke with -e stable,linxdot-ld1001,target-B when current slot is A. */
+            target-B:
+            {
+                images: (
+                    {
+                        filename = "rootfs.ext4";
+                        device = "/dev/mmcblk0p4";
+                        type = "raw";
+                        installed-directly = true;
+                        sha256 = "@SHA_ROOTFS@";
+                    },
+                    {
+                        filename = "boot.vfat";
+                        device = "/dev/mmcblk0p3";
+                        type = "raw";
+                        installed-directly = true;
+                        sha256 = "@SHA_BOOT@";
+                    }
+                );
+                bootenv: (
+                    { name = "boot_slot";         value = "B"; },
+                    { name = "upgrade_available"; value = "1"; },
+                    { name = "bootcount";         value = "0"; }
+                );
+            };
+
+            /* Invoke with -e stable,linxdot-ld1001,target-A when current slot is B. */
+            target-A:
+            {
+                images: (
+                    {
+                        filename = "rootfs.ext4";
+                        device = "/dev/mmcblk0p2";
+                        type = "raw";
+                        installed-directly = true;
+                        sha256 = "@SHA_ROOTFS@";
+                    },
+                    {
+                        filename = "boot.vfat";
+                        device = "/dev/mmcblk0p1";
+                        type = "raw";
+                        installed-directly = true;
+                        sha256 = "@SHA_BOOT@";
+                    }
+                );
+                bootenv: (
+                    { name = "boot_slot";         value = "A"; },
+                    { name = "upgrade_available"; value = "1"; },
+                    { name = "bootcount";         value = "0"; }
+                );
+            };
+        };
+    };
+};
