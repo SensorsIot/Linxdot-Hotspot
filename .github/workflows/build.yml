@@ -31,7 +31,11 @@ jobs:
         run: |
           echo "Checking shell scripts for syntax errors..."
           errors=0
-          for f in board/linxdot/overlay/etc/init.d/S*; do
+          for f in board/linxdot/overlay/etc/init.d/S* \
+                   board/linxdot/overlay/usr/sbin/ota-check \
+                   scripts/gen-signing-key.sh \
+                   tests/*.sh; do
+            [ -f "$f" ] || continue
             if ! bash -n "$f" 2>&1; then
               echo "FAIL: $f"
               errors=$((errors + 1))
@@ -59,15 +63,24 @@ jobs:
                    board/linxdot/overlay/etc/init.d/S50sshd \
                    board/linxdot/overlay/etc/init.d/S60dockerd \
                    board/linxdot/overlay/etc/init.d/S80dockercompose \
+                   board/linxdot/overlay/etc/fw_env.config \
                    board/linxdot/genimage.cfg \
                    board/linxdot/post-build.sh \
-                   board/linxdot/post-image.sh; do
+                   board/linxdot/post-image.sh \
+                   board/linxdot/boot.cmd \
+                   board/linxdot/uboot/linxdot.fragment \
+                   board/linxdot/uboot/env.txt; do
             if [ ! -f "$f" ]; then
               echo "ERROR: missing $f"
               exit 1
             fi
           done
           echo "Overlay structure OK"
+
+      - name: Run OTA static tests
+        run: |
+          sh tests/test_consistency.sh
+          sh tests/test_ota_state_machine.sh
 
   # ── Detect if base-affecting files changed ──
   detect-changes:
@@ -263,6 +276,8 @@ jobs:
           sudo ldconfig
 
       - name: Assemble image
+        env:
+          OS_VERSION: ${{ github.ref_name }}
         run: |
           mkdir -p work/target work/images work/build
 
@@ -274,7 +289,7 @@ jobs:
 
           echo ">>> Running post-build.sh..."
           chmod +x board/linxdot/post-build.sh
-          ./board/linxdot/post-build.sh work/target "$(pwd)"
+          OS_VERSION="${OS_VERSION#v}" ./board/linxdot/post-build.sh work/target "$(pwd)"
 
           echo ">>> Creating rootfs.ext4..."
           SIZE_KB=$(du -sk work/target/ | cut -f1)
@@ -311,12 +326,68 @@ jobs:
             echo "ERROR: Expected at least 3 partitions, found $PARTITIONS"
             exit 1
           fi
-          echo "Validation passed: $PARTITIONS partitions found"
+          echo "Partition count: $PARTITIONS"
+
+      - name: Run post-build image tests
+        run: |
+          IMAGE="work/images/linxdot-basics-station.img" \
+            sh tests/test_image_layout.sh
 
       - name: Compress image
         run: |
           cd work/images
           xz -9 -T0 -k linxdot-basics-station.img
+
+      - name: Build OTA update bundle (.swu)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd work/images
+
+          SHA_ROOTFS=$(sha256sum rootfs.ext4 | cut -d' ' -f1)
+          SHA_BOOT=$(sha256sum boot.vfat | cut -d' ' -f1)
+
+          sed -e "s|@VERSION@|$VERSION|g" \
+              -e "s|@SHA_ROOTFS@|$SHA_ROOTFS|g" \
+              -e "s|@SHA_BOOT@|$SHA_BOOT|g" \
+              "../../board/linxdot/swupdate/sw-description.tmpl" > sw-description
+
+          FILES="sw-description"
+          if [ -n "$OTA_SIGNING_KEY" ]; then
+            printf '%s' "$OTA_SIGNING_KEY" > /tmp/signing.key
+            chmod 600 /tmp/signing.key
+            openssl dgst -sha256 -sign /tmp/signing.key \
+                -out sw-description.sig sw-description
+            shred -u /tmp/signing.key
+            FILES="$FILES"$'\n'"sw-description.sig"
+            echo ">>> SWU signed with OTA_SIGNING_KEY"
+          else
+            echo ">>> WARNING: OTA_SIGNING_KEY secret not set — .swu will be UNSIGNED"
+          fi
+
+          FILES="$FILES"$'\n'"rootfs.ext4"$'\n'"boot.vfat"
+
+          SWU="linxdot-basics-station-${VERSION}.swu"
+          echo "$FILES" | cpio -ov -H newc > "$SWU"
+          ls -lh "$SWU"
+
+      - name: Generate manifest.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd work/images
+          SWU="linxdot-basics-station-${VERSION}.swu"
+          SHA=$(sha256sum "$SWU" | cut -d' ' -f1)
+          cat > manifest.json <<EOF
+          {
+            "version": "$VERSION",
+            "url": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$SWU",
+            "sha256": "$SHA"
+          }
+          EOF
+          cat manifest.json
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -331,5 +402,8 @@ jobs:
           github.repository == 'SensorsIot/Linxdot-Hotspot'
         uses: softprops/action-gh-release@v2
         with:
-          files: work/images/linxdot-basics-station.img.xz
+          files: |
+            work/images/linxdot-basics-station.img.xz
+            work/images/linxdot-basics-station-*.swu
+            work/images/manifest.json
           generate_release_notes: true
