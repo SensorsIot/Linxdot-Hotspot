@@ -15,15 +15,17 @@ mount -t tmpfs tmpfs /run -o mode=0755 2>/dev/null
 DATA_DEV=""
 
 detect_data_dev() {
+    # After A/B migration, the data partition is always #5 regardless of which
+    # rootfs slot is active (p2 for A, p4 for B).
     root_dev=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
     case "$root_dev" in
         /dev/mmcblk*p*)
             disk_dev="${root_dev%p*}"
-            DATA_DEV="${disk_dev}p3"
+            DATA_DEV="${disk_dev}p5"
             ;;
         /dev/sd*[0-9])
             disk_dev="${root_dev%[0-9]}"
-            DATA_DEV="${disk_dev}3"
+            DATA_DEV="${disk_dev}5"
             ;;
         *)
             echo "S00datapart: cannot determine disk device from root=$root_dev"
