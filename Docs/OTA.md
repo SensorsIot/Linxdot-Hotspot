@@ -81,6 +81,24 @@ logread | grep ota            # /var/log messages tagged 'ota'
 - `upgrade_available=1` stuck → `S98confirm` didn't commit; check Docker / Basics Station status.
 - Can't boot either slot → `rkdeveloptool` USB recovery required (disassembly).
 
+## Remote first-time flashing (no disassembly)
+
+OTA handles every update after the first A/B factory flash, but the factory flash itself requires `rkdeveloptool` over USB — which normally means opening the case to reach the LD1001's USB-C port. You can avoid the repeat open by leaving a USB cable routed once and driving Loader mode over the serial console:
+
+1. Route a USB-C cable from a host running `rkdeveloptool` (e.g. the Workbench Pi at `192.168.0.87`, where it's pre-installed at `/usr/bin/rkdeveloptool`) into the LD1001's USB-C port. Reclose the case with the cable exiting.
+2. Open the serial console: `python3 -c "import serial; s=serial.serial_for_url('rfc2217://192.168.0.87:4003', baudrate=1500000); ..."` or `picocom`.
+3. Reboot the LD1001 (`reboot` from Linux shell, or issue a `reset` from U-Boot).
+4. Interrupt autoboot with Ctrl-C to get the `=>` prompt.
+5. Enter download mode: `=> rockusb 0 mmc 0`  (or `=> download`).
+6. The device now appears as a Rockchip USB device on the host. Flash:
+   ```
+   ssh pi@192.168.0.87 'sudo rkdeveloptool ld'                            # should show the device
+   ssh pi@192.168.0.87 'sudo rkdeveloptool wl 0 /tmp/linxdot-...img'     # write image
+   ssh pi@192.168.0.87 'sudo rkdeveloptool rd'                            # reset and boot new image
+   ```
+
+After this bootstrap, OTA (`ota-check`) is the only thing needed for future updates.
+
 ## What's NOT updated by OTA
 
 - `idbloader.img` and `u-boot.itb` — bootloader stays frozen post-factory-flash. Updating these has no fallback slot and would risk bricking. Requires a new factory image + `rkdeveloptool` to change.

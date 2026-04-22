@@ -3,11 +3,12 @@
 **Branch:** `OTA`
 **Goal:** Deliver Ethernet-only over-the-air updates for the Linxdot LD1001, with bootloader-level auto-rollback on failure. No physical access (USB, buttons) required for any normal update.
 
-**Status:** Code-complete for Phase 3 + Phase 4 layer. Runtime behaviour documented in `Docs/OTA.md`. Awaiting:
-- Task 18 — BootROM secure-mode verification on hardware
-- Task 8 — A/B rollback validation on hardware
-- Task 16 — end-to-end OTA trial on hardware
-- Task 10 — operator runs `scripts/gen-signing-key.sh` and uploads `OTA_SIGNING_KEY` to GitHub Actions secrets (unsigned `.swu` builds work but are dev-mode only)
+**Status:** Code-complete for Phase 3 + Phase 4 layer. Runtime behaviour documented in `Docs/OTA.md`. Hardware access established via the Workbench Pi — see `Docs/Hardware.md § Serial Console Access` and `Docs/OTA.md § Remote first-time flashing`.
+
+- Task 18 — **done.** BootROM confirmed non-secure via boot-log evidence (vendor SPL prints `## Verified-boot: 0`, custom `-dirty` SPL loads unsigned). `Docs/Hardware.md § BootROM secure-mode status` captures the reasoning.
+- Task 8 — A/B rollback validation on hardware (scriptable over workbench serial once Phase 3 is flashed).
+- Task 16 — end-to-end OTA trial on hardware (same).
+- Task 10 — operator runs `scripts/gen-signing-key.sh` and uploads `OTA_SIGNING_KEY` to GitHub Actions secrets (unsigned `.swu` builds work but are dev-mode only).
 
 ---
 

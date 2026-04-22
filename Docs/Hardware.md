@@ -261,6 +261,17 @@ See `Docs/54-00177.pdf` for the audio jack datasheet and pinout.
 
 A standard FTDI USB-to-serial adapter with a 3.5mm TRRS cable can be used for console access. Use `picocom -b 1500000 /dev/ttyUSB0` or equivalent.
 
+**Remote access via Universal-Embedded-Workbench.** The LD1001's serial console is exposed over RFC2217 on the Workbench Pi at `192.168.0.87` (SLOT3, TCP port 4003). Any RFC2217-aware client works — from a dev container:
+
+```python
+import serial
+s = serial.serial_for_url('rfc2217://192.168.0.87:4003', baudrate=1500000, timeout=0.3)
+```
+
+The slot map is queryable via `curl http://192.168.0.87:8080/api/devices`. This is the practical way to drive the device from CI/dev containers without physical cable access.
+
+**Vendor login:** `root` / `linxdot`.
+
 ## I2C Buses
 
 | Bus | Controller | Devices |
@@ -291,6 +302,8 @@ A standard FTDI USB-to-serial adapter with a 3.5mm TRRS cable can be used for co
 | OHCI #2 | USB 1.1 | 0xfd8c0000 | Bus 4, 1 port |
 
 The USB-C port on the board is used for both flashing (Maskrom/Loader mode via Rockchip USB protocol) and USB host connectivity.
+
+The USB-C port is located behind the case — accessing it normally requires opening the device. However, the vendor U-Boot exposes `rockusb` and `download` commands, so Loader mode can be entered from the serial console without any button press. If a USB data cable is routed from a host running `rkdeveloptool` to the LD1001's USB-C (a one-time routing, cable can stay connected), all subsequent flashes are fully remote via the Workbench serial console.
 
 ## GPIO
 
@@ -325,11 +338,23 @@ The USB-C port on the board is used for both flashing (Maskrom/Loader mode via R
 
 | Property | Value |
 |----------|-------|
-| Version | U-Boot 2017.09 (Rockchip vendor fork) |
+| Version | `U-Boot 2017.09-gdde42ec6a2-dirty #ccrisan` (Aug 02 2023 build, Crankk-lineage custom fork) |
 | Console | ttyS2 @ 1,500,000 baud |
 | eMMC device | `mmc 0` (sdhci@fe310000) |
-| Boot sequence | Android boot → FIT image → distro_bootcmd (finds boot.scr) |
+| Boot sequence | Android boot → FIT image → distro_bootcmd (finds `/extlinux/extlinux.conf`) |
 | Autoboot | `Hit key to stop autoboot('CTRL+C')` — interrupt with Ctrl+C |
+| Download modes | `rockusb`, `download` commands available — can enter Rockchip download mode from serial without a physical button (requires USB data cable to host running `rkdeveloptool`) |
+
+### BootROM secure-mode status
+
+Vendor U-Boot 2017.09 lacks `fuse`/`efuse`/`otp` commands, so the RK3566 secure-boot OTP bit cannot be read directly. Strong indirect evidence confirms the BootROM is **non-secure** (i.e. it accepts unsigned SPL):
+
+- Vendor SPL prints `## Verified-boot: 0` during boot.
+- SPL computes sha256 of loaded blocks but does not verify any signature.
+- The vendor U-Boot itself is a custom `-dirty` build (`#ccrisan`), which a secure-locked BootROM would reject.
+- Reported model is the generic "Rockchip RK3568 Evaluation Board" — no vendor lockdown markers.
+
+This is the basis on which Phase 3 (Buildroot-built U-Boot + TF-A from source) can be flashed safely.
 
 ### MMC Device Numbering (Important)
 
