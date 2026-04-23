@@ -64,8 +64,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 | Partition | Filesystem | Purpose | Shared across updates? |
 |---|---|---|---|
-| `idbloader` (raw, 32 KiB) | — | Rockchip SPL + DDR init | Frozen after factory flash |
-| `u-boot.itb` (raw, 8 MiB) | — | TF-A BL31 + U-Boot | Frozen after factory flash |
+| `uboot` (raw, offset 32 KiB, ~14 MiB) | — | `u-boot-rockchip.bin` — unified SPL + FIT (TF-A BL31 + U-Boot) | Frozen after factory flash |
 | `uboot_env` (raw, 14 MiB + 128 KiB) | — | U-Boot env (primary + redundant) | Persistent |
 | `boot_a` (p1, 30 MiB) | vfat | Kernel + DTB + boot.scr (slot A) | Replaced on OTA targeting A |
 | `rootfs_a` (p2, 500 MiB) | ext4 | Rootfs (slot A) | Replaced on OTA targeting A |
@@ -84,8 +83,8 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 | `altbootcmd` | Rollback script: flip slot if `upgrade_available=1`, reset bootcount, retry | (see `board/linxdot/uboot/env.txt`) |
 
 **Boot sequence (Phase 3+):**
-1. BootROM loads idbloader from eMMC sector 64.
-2. SPL initialises DDR (via rkbin DDR blob) and loads `u-boot.itb` from 8 MiB.
+1. BootROM loads the SPL portion of `u-boot-rockchip.bin` from eMMC sector 64 (32 KiB offset).
+2. SPL initialises DDR (via rkbin DDR blob) and loads the FIT image from within the same blob at ~8 MiB.
 3. TF-A BL31 runs at EL3, then passes control to U-Boot in EL2.
 4. U-Boot's compiled bootcmd picks partition 1 or 3 from `${boot_slot}`, loads `boot.scr`.
 5. `boot.scr` loads `Image` + `rk3566-linxdot.dtb` from the same partition, sets `root=/dev/mmcblk0p2` or `p4`, `booti`.

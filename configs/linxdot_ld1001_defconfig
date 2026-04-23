@@ -20,8 +20,9 @@ BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
 BR2_TARGET_UBOOT_NEEDS_ATF_BL31=y
 BR2_TARGET_UBOOT_NEEDS_ATF_BL31_ELF=y
 BR2_TARGET_UBOOT_NEEDS_ROCKCHIP_RKBIN=y
-BR2_TARGET_UBOOT_FORMAT_ITB=y
-BR2_TARGET_UBOOT_SPL_NAME="idbloader.img"
+# Modern Rockchip U-Boot emits a unified u-boot-rockchip.bin (SPL + FIT w/ BL31 + u-boot).
+# Do not select FORMAT_ITB / SPL_NAME — the unified blob is installed via
+# the NEEDS_ROCKCHIP_RKBIN post-install hook and written at offset 32K.
 
 # TF-A — built from source (Phase 3); RK3566 uses rk3568 platform by convention.
 # v2.12.0 is the first upstream release with plat/rockchip/rk3568; v2.10/v2.11 lack it.
