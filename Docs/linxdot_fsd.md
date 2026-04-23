@@ -562,7 +562,7 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 **Hardware validation (open — FSD §3.3 exit criteria):**
 - [ ] **Pre-flight: BootROM non-secure-lock verification** (bricking risk — must be done before any Buildroot-built SPL is flashed).
 - [ ] Physical flashing path from Workbench Pi (`rkdeveloptool` + routed USB cable, or `rockusb` serial drop).
-- [ ] Draft `Docs/phase3_hardware_validation.md` runbook covering BootROM check, flashing, and TC-3.3..TC-3.6 procedures with pass criteria.
+- [x] Runbook `Docs/phase3_hardware_validation.md` covering BootROM check, flashing, and TC-3.3..TC-3.6 procedures with pass criteria.
 - [ ] **TC-3.3** Built U-Boot boots to Linux login on hardware.
 - [ ] **TC-3.4** `fw_setenv` / `fw_printenv` round-trip from userspace.
 - [ ] **TC-3.5** Healthy-slot transient resilience (crashes before commit → bootcount reset, slot not flipped).
@@ -596,7 +596,7 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 
 ### 11.4 Housekeeping
 
-- [ ] Hardware validation runbook (see §11.1).
+- [x] Hardware validation runbook — `Docs/phase3_hardware_validation.md`.
 - [ ] Prune Phase 1 vendor blobs from `board/linxdot/blobs/` (`idbloader.img`, `u-boot.itb`) once Phase 3 is hardware-validated and the branch merges — currently kept as a rollback fallback for the pre-A/B migration path (C-5, §7.4).
 - [ ] Migrate CLAUDE.md to describe the merged (Phase 3+) baseline once `OTA` → `main`.
 
