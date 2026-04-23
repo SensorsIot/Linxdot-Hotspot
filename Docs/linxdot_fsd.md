@@ -230,7 +230,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - Buildroot 2024.02 LTS.
 - U-Boot 2024.04 (or later) upstream support for RK3566.
 - TF-A upstream support for RK3568 (used as `PLAT` for RK3566).
-- Rockchip rkbin DDR TPL blob (`rk3568_ddr_1560MHz_v1.xx.bin`).
+- Rockchip rkbin DDR TPL blob (`rk3568_ddr_1560MHz_v1.23.bin`).
 - GitHub Releases as the OTA artifact hosting endpoint.
 - Docker image `xoseperez/basicstation` (upstream).
 - TTN (The Things Network) as the LNS.
@@ -480,7 +480,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | TF-A version | `v2.12.0` (first upstream release with `plat/rockchip/rk3568`) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION_VALUE` |
 | TF-A platform | `rk3568` (for RK3566 by convention) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM` |
 | U-Boot defconfig base | `quartz64-a-rk3566` | defconfig `BR2_TARGET_UBOOT_BOARD_DEFCONFIG` |
-| DDR TPL blob | `rk3568_ddr_*_v1.xx.bin` (rkbin) | `BR2_PACKAGE_ROCKCHIP_RKBIN` |
+| DDR TPL blob | `bin/rk35/rk3568_ddr_1560MHz_v1.23.bin` (rkbin) | `BR2_PACKAGE_ROCKCHIP_RKBIN_TPL_FILENAME` |
 | OTA manifest URL | `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` | `overlay/usr/sbin/ota-check` |
 
 ### 10.2 Extraction from CrankkOS (historical, Phase 1 bring-up)
