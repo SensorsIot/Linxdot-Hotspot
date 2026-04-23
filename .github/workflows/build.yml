@@ -238,6 +238,7 @@ jobs:
             --notes "BASE_HASH=${{ steps.hash.outputs.hash }}" \
             --prerelease \
             buildroot/output/images/rootfs.tar.xz \
+            buildroot/output/images/u-boot-rockchip.bin \
             host-tools.tar.gz
 
   # ── Fast image assembly (~2-3 min) — on tags, manual dispatch, or after base-build ──
@@ -260,7 +261,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           echo "Downloading base rootfs from base-latest release..."
-          gh release download base-latest -p 'rootfs.tar.xz' -p 'host-tools.tar.gz' -D /tmp/base/ \
+          gh release download base-latest \
+            -p 'rootfs.tar.xz' -p 'host-tools.tar.gz' -p 'u-boot-rockchip.bin' \
+            -D /tmp/base/ \
             || { echo "ERROR: No base release found. Push a change to defconfig or package/ to trigger a base build."; exit 1; }
           ls -lh /tmp/base/
 
@@ -283,6 +286,9 @@ jobs:
 
           echo ">>> Extracting base rootfs..."
           tar xf /tmp/base/rootfs.tar.xz -C work/target/
+
+          echo ">>> Staging bootloader blob for genimage..."
+          cp /tmp/base/u-boot-rockchip.bin work/images/
 
           echo ">>> Applying overlay..."
           rsync -a board/linxdot/overlay/ work/target/
