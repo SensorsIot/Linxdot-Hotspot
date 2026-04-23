@@ -220,6 +220,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 | Partial `.swu` download corrupts slot | Low | Low | SWUpdate verifies sha256 of each image before committing; `upgrade_available` is not set on failed download. |
 | `S98confirm` health gate false-negative (Basics Station slow to connect) | Medium | Medium | 120 s wait; can be tuned in the init script. Worst-case outcome is a rollback to the prior known-good slot, which is recoverable. |
 | Private signing key leaks | Low | High | Key stored only in GitHub Actions secret (`OTA_SIGNING_KEY`). Rotation procedure in § 7.5. Devices only trust the baked-in public key. |
+| `host-tools.tar.gz` bundles runner libc via unfiltered `ldd` (base-build job) and the release job `sudo cp`s it into `/usr/local/lib/` + runs `ldconfig` | High (already observed 2026-04-23) | High | genimage's only non-system dep is `libconfuse2`; filter `ldd` to non-system libs **or** drop the bundle and `apt-get install libconfuse2` on the release runner. Never replay the release install step inside the devcontainer — Debian trixie's `/bin/sh` will SIGFPE against an Ubuntu 22.04 libc (`GLIBC_2.38 not found`). See § 7.2. |
 
 **Assumptions:**
 - The LD1001 BootROM is shipped **non-secure** (evidence: vendor SPL prints `## Verified-boot: 0`, accepts unsigned custom `-dirty` build). This has been spot-checked on one unit; operators should confirm on their own hardware before first flash.
@@ -304,6 +305,8 @@ First build takes ~1 hour (downloads toolchain, all source tarballs). Subsequent
    - `detect-changes`: compare hash of base-affecting files against stored hash from `base-latest` release.
    - `base-build` (only if changed, ~1 h): full Buildroot rebuild → uploads `rootfs.tar.xz` + `host-tools.tar.gz` to `base-latest` prerelease.
    - `release` (~3 min): download cached base, apply overlay, run `post-build.sh` + `post-image.sh`, validate image, build signed `.swu` if `OTA_SIGNING_KEY` secret is set, emit `manifest.json`, upload `.img.xz` + `.swu` + `manifest.json` to the tagged release.
+
+> **Do NOT replay the `release` job's "Install host tools" step locally (especially inside the devcontainer).** `host-tools.tar.gz` is currently built with an unfiltered `ldd` loop (`.github/workflows/build.yml` Bundle host tools step) that includes `libc.so.6` and `ld-linux-x86-64.so.2` from the Ubuntu 22.04 runner. The release job then `sudo cp`s them into `/usr/local/lib/` and runs `ldconfig`, which fatally downgrades the libc seen by `/bin/sh` on any newer distro (symptom: `Floating point exception` + `GLIBC_2.38 not found`, container fails to start). `genimage`'s only non-apt dependency is `libconfuse2` — install that instead. This CI behaviour is tracked in the risk table (§5).
 
 ### 7.3 First-time flashing
 

@@ -1,6 +1,12 @@
 # Buildroot build directory
 buildroot/
 
+# Local Phase 3 image-assembly scratch (populated by scripts on devcontainer)
+.phase3-stage/
+
+# Core dumps
+core.*
+
 # WiFi firmware (not committed due to licensing)
 board/linxdot/firmware/
 
