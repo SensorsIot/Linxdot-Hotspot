@@ -41,9 +41,21 @@ The test is non-destructive: `db` loads into RAM, nothing is written to eMMC.
 
 ### 1.1 Put the device into MaskROM / Loader mode
 
+**First flash only (vendor bootloader still on eMMC):**
 1. Power down the LD1001.
 2. Hold the **BT-Pair** button near the antenna connector while applying power; keep held for 5 s.
-3. On the host: `rkdeveloptool ld`. Expect a `DevNo=1 Vid=0x2207,Pid=0x350a,LocationID=... Loader` (or `Maskrom`) line.
+3. On the host: `rkdeveloptool ld`. Expect `DevNo=1 Vid=0x2207,Pid=0x350a,... Loader`.
+
+**Subsequent flashes (Phase 3 bootloader already on eMMC):**
+BT-Pair **no longer works** — it was a vendor-SPL feature (the vendor 2017 SPL checked the BT-Pair GPIO and jumped to `rockusb`). Our mainline U-Boot 2024.04 SPL on `quartz64-a-rk3566` doesn't know about it, so BT-Pair + power just falls through to a normal boot. Use this path instead:
+
+1. Start RFC2217 serial capture with continuous Ctrl-C spam (≤50 ms interval) on the host side.
+2. Power-cycle the LD1001 normally (no BT-Pair).
+3. Ctrl-C catches the 2 s autoboot window → lands at U-Boot `=>` prompt.
+4. From the prompt: `mw.l 0xfdc20200 0xef08a53c; reset`. BootROM reads `PMU_GRF_OS_REG0` on the next cold boot and enters MaskROM mode (silent on UART, but enumerates on USB as `Vid=0x2207,Pid=0x350a Maskrom`).
+5. `rkdeveloptool ld` now returns Maskrom — proceed.
+
+Observed 2026-04-23. Magic register offset is `0x200` (OS_REG0). Writing to `0x208` (OS_REG8) does nothing useful and can desync DDR init on the next boot.
 
 ### 1.2 Try to run a generic rkbin USB plug loader
 
@@ -216,13 +228,45 @@ Phase 4 (TC-4.x — OTA) may then begin.
 - **Serial baud mismatch.** If you see garbled output, confirm the host terminal is at **1,500,000** baud, not 115,200. Vendor DTB hard-codes it (FSD §4.3 C-2).
 - **U-Boot vs. kernel MMC numbering.** Confirmed on hardware: U-Boot `mmc 0` is the eMMC and the vendor 5.15 kernel sees that same eMMC as `/dev/mmcblk1`. Use `mmc 0:<part>` in `boot.cmd`'s `load` commands and `root=/dev/mmcblk1p{2,4}` in `bootargs`. Phase 1 commit `1291432` first documented this; regressing it causes an infinite `rootwait` (CPU hot, no console).
 - **Data preservation.** `/data` survives everything in this runbook **except** a full `rkdeveloptool wl` re-flash (§2), which recreates the partition and erases `tc_key.txt`. Back up first.
+- **Vendor BT-Pair GPIO is a vendor-SPL feature, not a BootROM feature.** Once the Phase 3 bootloader is flashed, BT-Pair + power no longer enters Loader mode — the mainline SPL doesn't check it. This is a permanent consequence of replacing the vendor SPL. Use the `mw.l 0xfdc20200 0xef08a53c; reset` recovery below. Observed 2026-04-23.
+- **Kernel silent after `Starting kernel ...` with TF-A v2.12.0.** The vendor 5.15.104 kernel calls Rockchip-vendor SIP SMCs (`0x82000xxx` range) that upstream TF-A v2.12.0 does not implement. Kernel hangs silently in early init (CPU hot, no console, no network). Use vendor BL31 from rkbin instead (defconfig `BR2_PACKAGE_ROCKCHIP_RKBIN_BL31_FILENAME`). Observed 2026-04-23; resolved with `rk3568_bl31_v1.43.elf`. Fully documented in FSD §3.3.
+- **Serial listener must be pre-armed before power-cycle.** The 2 s autoboot window is too narrow to miss by racing — start the Ctrl-C spammer first, then cycle power. Post-hoc attempts to catch autoboot always lose.
+- **CI green does not mean the device boots.** CI validates that the image *assembles*, that shell scripts lint, and that OTA state-machine unit tests pass — none of which catches `root=/dev/mmcblk0p2` vs `mmcblk1p2`, missing `bootcmd` in env, Git-LFS placeholder blobs, or BL31 ABI mismatch. Phase 3 hardware sign-off is non-negotiable before declaring the build ready to ship.
 
 ### 8.1 Recovery recipes
 
-- **MaskROM recovery from a U-Boot prompt** (when BT-Pair isn't physically accessible):
+- **MaskROM recovery from a U-Boot prompt** — the standard way to flash a Phase 3 device, since BT-Pair no longer triggers Loader mode:
   ```
   => mw.l 0xfdc20200 0xef08a53c   # BOOT_BROM_DOWNLOAD → PMU_GRF_OS_REG0
   => reset
   ```
-  On the next boot, BootROM sees the magic and stays in USB download mode. Host then sees `Maskrom` via `rkdeveloptool ld`. The offset is `0x200` (OS_REG0), **not** `0x208` (OS_REG8) — a wrong offset lets SPL run and may fail DDR training.
+  On the next boot, BootROM reads the magic and stays in USB download mode. Host then sees `Maskrom` via `rkdeveloptool ld`. Offset is `0x200` (OS_REG0), **not** `0x208` (OS_REG8) — a wrong offset lets SPL run, and a reset from that state can wedge DDR training.
+
+- **Catching the U-Boot prompt** requires that the host's serial Ctrl-C spammer be armed *before* the power cycle; 2 s of bootdelay is too short to race. Typical sequence:
+  1. On host: start a Python/pyserial loop that sends `\x03` every 20–50 ms to `rfc2217://<workbench>:4003` and reads for `=>`.
+  2. Power-cycle the LD1001.
+  3. Spammer catches the autoboot countdown.
+  4. Spammer then writes the magic + reset (above).
+
 - **From MaskROM to Loader.** `rkdeveloptool db` requires a Rockchip-header-wrapped loader produced by `boot_merger` (see Prerequisites in §0). Raw `rk356x_usbplug_v1.17.bin` and our own `u-boot-rockchip.bin` are both rejected as `Opening loader failed`.
+
+### 8.2 End-to-end flash workflow (reference)
+
+For a device already running the Phase 3 bootloader (i.e. every flash after the first):
+
+```
+# host: ensure packed loader + image ready on flashing host
+#   /path/rk356x_spl_loader_v1.23.114.bin        (boot_merger output, see §0)
+#   /path/linxdot-basics-station.img              (xz -d of CI artifact)
+
+# step 1 — spammer catches autoboot, writes magic, issues reset
+# step 2 — wait for Maskrom on USB
+# step 3 — load usbplug
+sudo rkdeveloptool db /path/rk356x_spl_loader_v1.23.114.bin
+# step 4 — flash
+sudo rkdeveloptool wl 0 /path/linxdot-basics-station.img
+# step 5 — boot the new image
+sudo rkdeveloptool rd
+```
+
+`scripts/phase3_preflight.sh` and `scripts/phase3_flash.sh` automate the first flash; a similar helper for the "already Phase 3" case is TODO.

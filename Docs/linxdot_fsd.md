@@ -567,13 +567,20 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - [x] TC-3.2 state machine simulation (`tests/test_ota_state_machine.sh`) — runs in CI validate
 
 **Hardware validation (open — FSD §3.3 exit criteria):**
-- [ ] **Pre-flight: BootROM non-secure-lock verification** (bricking risk — must be done before any Buildroot-built SPL is flashed).
-- [ ] Physical flashing path from Workbench Pi (`rkdeveloptool` + routed USB cable, or `rockusb` serial drop).
+- [x] **Pre-flight: BootROM non-secure-lock verification** (evidence-cleared 2026-04-23: SPL prints `Verified-boot: 0`, unsigned `-dirty` builds run).
+- [x] Physical flashing path from Workbench Pi (`rkdeveloptool` via routed USB-C at SLOT1/2, `boot_merger`-packed loader for `db` — see runbook §0 + §8.2).
 - [x] Runbook `Docs/phase3_hardware_validation.md` covering BootROM check, flashing, and TC-3.3..TC-3.6 procedures with pass criteria.
-- [ ] **TC-3.3** Built U-Boot boots to Linux login on hardware.
+- [x] **TC-3.3** Built U-Boot boots to Linux login on hardware — signed off 2026-04-23 on the Workbench LD1001 at 192.168.0.142 (run 24854453113, commit `01e3fd7`). Full chain: vendor DDR TPL → our SPL 2024.04 → FIT hash verify → rkbin BL31 v1.43 → U-Boot 2024.04 → autoboot → kernel → BusyBox userspace → dropbear + Docker + SWUpdate all started.
 - [ ] **TC-3.4** `fw_setenv` / `fw_printenv` round-trip from userspace.
 - [ ] **TC-3.5** Healthy-slot transient resilience (crashes before commit → bootcount reset, slot not flipped).
 - [ ] **TC-3.6** Broken-slot rollback (`altbootcmd` flips slot after `bootlimit` failures).
+
+**Session-3 learnings captured in the runbook and applied in code (commits `5c88e53`, `ad63c3e`, `3441c0a`, `01e3fd7`):**
+- `root=/dev/mmcblk1p{2,4}` in `bootargs` (kernel's view of eMMC), not `mmcblk0` (U-Boot's view). Regression from Phase 1 commit `1291432` that cost us hours of silent rootwait before diagnosis.
+- `env.txt` must duplicate compiled-in `bootcmd`, `bootdelay`, and the aarch64 load addresses — saved env is wholesale-replace, not merge.
+- Local builds need `git lfs pull` before `post-build.sh`; the prebuilt kernel Image + DTB in `board/linxdot/blobs/` are LFS pointers otherwise.
+- TF-A v2.12.0 was the planned BL31; switched to vendor rkbin BL31 v1.43 after hardware proved mainline TF-A doesn't implement the Rockchip SIP SMCs the vendor 5.15 kernel calls. Revisit when Phase 2 (mainline kernel) lands.
+- Phase 3 permanently removes the vendor BT-Pair → Loader shortcut (vendor-SPL feature). Post-Phase-3 re-flash path is `serial Ctrl-C spam → U-Boot prompt → mw.l 0xfdc20200 0xef08a53c; reset → Maskrom → db → wl`. Fully documented in runbook §1.1 and §8.1.
 
 **Defense-in-depth (open — non-blocking):**
 - [ ] Bake `altbootcmd` into U-Boot compiled-in default env (via `CONFIG_USE_DEFAULT_ENV_FILE=y` + pre-build hook to stage `env.txt`). Currently lives only in flashed `uboot-env.bin`; compiled-in fallback is missing. FR-4.4 defense case.
