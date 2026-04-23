@@ -478,6 +478,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | `CONFIG_ENV_SIZE` | `0x10000` (64 KiB) | same |
 | `CONFIG_ENV_OFFSET_REDUND` | `0xE10000` | same |
 | `bootlimit` | `3` | `board/linxdot/uboot/env.txt` |
+| TF-A version | `v2.12.0` (first upstream release with `plat/rockchip/rk3568`) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION_VALUE` |
 | TF-A platform | `rk3568` (for RK3566 by convention) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM` |
 | U-Boot defconfig base | `quartz64-a-rk3566` | defconfig `BR2_TARGET_UBOOT_BOARD_DEFCONFIG` |
 | DDR TPL blob | `rk3568_ddr_*_v1.xx.bin` (rkbin) | `BR2_PACKAGE_ROCKCHIP_RKBIN` |
