@@ -7,10 +7,13 @@
 # Bootcount auto-increment and rollback are handled by CONFIG_BOOTCOUNT_LIMIT
 # and altbootcmd (see board/linxdot/uboot/env.txt) — not here.
 
+# U-Boot numbers eMMC as mmc 0 but the vendor kernel sees it as mmcblk1.
+# Keep U-Boot's view (mmc 0:) for the `load` commands below and use the
+# kernel's view (mmcblk1) for root=. See Phase 1 commit 1291432 and CLAUDE.md.
 if test "${boot_slot}" = "B"; then
-    setenv rootdev /dev/mmcblk0p4
+    setenv rootdev /dev/mmcblk1p4
 else
-    setenv rootdev /dev/mmcblk0p2
+    setenv rootdev /dev/mmcblk1p2
 fi
 
 setenv bootargs "root=${rootdev} rootfstype=ext4 rootwait ro console=ttyS2,1500000 panic=10"
