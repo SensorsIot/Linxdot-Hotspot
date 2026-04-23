@@ -43,7 +43,7 @@ else
     err "could not read boot_a start sector"
 fi
 
-# ── Raw-region spot checks: idbloader magic at 32 KiB, u-boot at 8 MiB ──────
+# ── Raw-region spot check: SPL magic at 32 KiB (start of u-boot-rockchip.bin) ─
 IDB_MAGIC=$(dd if="$IMAGE" bs=1 skip=32768 count=4 2>/dev/null | od -An -t x1 | tr -d ' \n')
 echo "Bytes at 32 KiB (idbloader): $IDB_MAGIC"
 # Rockchip idbloader starts with "LDR " (0x4C 0x44 0x52 0x20) or Rockchip magic.

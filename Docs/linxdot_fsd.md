@@ -204,10 +204,10 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 ### 4.3 Constraints
 
-- **C-1** The RK3566 BootROM expects `idbloader.img` at eMMC sector 64 (32 KiB) and `u-boot.itb` at sector 16384 (8 MiB). These offsets are fixed by silicon.
+- **C-1** The RK3566 BootROM expects the SPL (idbloader) at eMMC sector 64 (32 KiB) and the FIT image (U-Boot + BL31) at sector 16384 (8 MiB). These offsets are fixed by silicon. Phase 3+ writes a single unified `u-boot-rockchip.bin` at offset 32 KiB whose internal layout places both sub-parts at the required absolute offsets.
 - **C-2** The vendor DTB (`rk3566-linxdot.dtb`) declares `stdout-path = "serial2:1500000n8"`; while this DTB is used, console must remain at 1.5 Mbaud. Phase 5 (in-tree DTS) lifts this constraint.
 - **C-3** A Rockchip DDR init blob from rkbin (`rk3568_ddr_*_v1.xx.bin`) is unavoidable on RK356x — fully FOSS boot is not possible.
-- **C-4** `idbloader.img` and `u-boot.itb` are **not** updated by OTA. They remain as first written at factory-flash time. Updating them would require a new factory image and `rkdeveloptool`. This is intentional: there is no redundant bootloader slot, so a bad bootloader write would brick the device.
+- **C-4** The bootloader blob (`u-boot-rockchip.bin`, covering SPL + FIT with BL31 + U-Boot) is **not** updated by OTA. It remains as first written at factory-flash time. Updating it would require a new factory image and `rkdeveloptool`. This is intentional: there is no redundant bootloader slot, so a bad bootloader write would brick the device.
 - **C-5** Devices flashed with the pre-A/B (Phase 1) image cannot receive OTA updates. A one-time `rkdeveloptool` reflash with the A/B image is required to migrate. `/data` is recreated on reflash; `tc_key.txt` must be backed up beforehand.
 - **C-6** WiFi firmware (`firmware/brcm/`) is not distributable under the Broadcom licence and must be extracted from a CrankkOS image locally before building a WiFi-capable variant.
 
@@ -395,7 +395,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 |---|---|---|---|
 | TC-3.1 | Static env consistency | `sh tests/test_consistency.sh` on CI | Offsets agree across fragment, fw_env.config, genimage.cfg |
 | TC-3.2 | OTA state machine | `sh tests/test_ota_state_machine.sh` | All 10 simulated scenarios pass (healthy boots, transient hangs, trial-boot commit, rollback both directions, bootlimit edge) |
-| TC-3.3 | Built U-Boot boots | Flash built image, observe serial | Reaches Linux login using Buildroot-produced idbloader + u-boot.itb |
+| TC-3.3 | Built U-Boot boots | Flash built image, observe serial | Reaches Linux login using Buildroot-produced `u-boot-rockchip.bin` (unified SPL + FIT + BL31) |
 | TC-3.4 | `fw_setenv` from Linux | `fw_setenv test_var hello; fw_printenv test_var` on device | Writes and reads back correctly |
 | TC-3.5 | Healthy-slot transient resilience | Force enough reboots to exceed `bootlimit` without committing (simulate crash before `S98confirm` on slot A) | `altbootcmd` fires, resets `bootcount`, slot remains A (not flipped) |
 | TC-3.6 | Rollback on broken slot | Install garbage to rootfs_b, `fw_setenv boot_slot B upgrade_available 1 bootcount 0`, reboot | U-Boot tries B, fails N times, `altbootcmd` flips to A, device boots A |
@@ -405,7 +405,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | Test ID | Feature | Procedure | Expected |
 |---|---|---|---|
 | TC-4.1 | SWU packaging | `sh tests/test_swu_packaging.sh` | CPIO archive built, `sw-description` is first entry, sha256 placeholders substituted |
-| TC-4.2 | Image layout | `IMAGE=... sh tests/test_image_layout.sh` | 5 partitions, boot_a at 16 MiB, non-empty idbloader and env regions |
+| TC-4.2 | Image layout | `IMAGE=... sh tests/test_image_layout.sh` | 5 partitions, boot_a at 16 MiB, non-empty SPL region at 32 KiB and env region at 14 MiB |
 | TC-4.3 | Signature required | Generate keypair, sign release, flash; publish unsigned release next | Device refuses unsigned bundle, `swupdate` logs signature failure |
 | TC-4.4 | End-to-end happy path | Device on v0.1.0, publish v0.1.1, wait 60 s after boot | `S99otacheck` fetches manifest, downloads, writes inactive slot, reboots; `S98confirm` commits; `fw_printenv boot_slot` matches target, `os-release VERSION_ID=0.1.1` |
 | TC-4.5 | End-to-end rollback | Device on v0.1.1 (committed), publish deliberately-broken v0.1.2 | Device attempts v0.1.2, fails, `altbootcmd` rolls back to v0.1.1 within `bootlimit` cycles |
@@ -539,3 +539,64 @@ scripts/gen-signing-key.sh         One-time signing-key generator
 tests/                             Static + runtime test suite
 .github/workflows/build.yml        CI: validate, base-build, release
 ```
+
+## 11. Open Items / Backlog
+
+Consolidated list of work remaining per phase. Close an item by deleting its line (with the commit that closes it). Cross-reference FR/NFR/TC IDs where applicable; the state flags are:
+
+- **`[ ]`** open — not started or not yet verified
+- **`[~]`** in progress / partial
+- **`[x]`** done (keep briefly for visibility, prune when a phase closes)
+
+### 11.1 Phase 3 — Bootloader from source
+
+**Software / CI (closed):**
+- [x] TF-A v2.12.0 pinned; rk3568 plat builds
+- [x] U-Boot 2024.04 on `quartz64-a-rk3566` with `linxdot.fragment` (baud, env, bootcount, slot-aware bootcmd)
+- [x] Unified `u-boot-rockchip.bin` flow (SPL + FIT + BL31)
+- [x] rkbin DDR TPL pinned to `rk3568_ddr_1560MHz_v1.18.bin`
+- [x] CI end-to-end green (base-build + release) — run 24827994009, 2026-04-23
+- [x] TC-3.1 consistency tests (`tests/test_consistency.sh`) — runs in CI validate
+- [x] TC-3.2 state machine simulation (`tests/test_ota_state_machine.sh`) — runs in CI validate
+
+**Hardware validation (open — FSD §3.3 exit criteria):**
+- [ ] **Pre-flight: BootROM non-secure-lock verification** (bricking risk — must be done before any Buildroot-built SPL is flashed).
+- [ ] Physical flashing path from Workbench Pi (`rkdeveloptool` + routed USB cable, or `rockusb` serial drop).
+- [ ] Draft `Docs/phase3_hardware_validation.md` runbook covering BootROM check, flashing, and TC-3.3..TC-3.6 procedures with pass criteria.
+- [ ] **TC-3.3** Built U-Boot boots to Linux login on hardware.
+- [ ] **TC-3.4** `fw_setenv` / `fw_printenv` round-trip from userspace.
+- [ ] **TC-3.5** Healthy-slot transient resilience (crashes before commit → bootcount reset, slot not flipped).
+- [ ] **TC-3.6** Broken-slot rollback (`altbootcmd` flips slot after `bootlimit` failures).
+
+**Defense-in-depth (open — non-blocking):**
+- [ ] Bake `altbootcmd` into U-Boot compiled-in default env (via `CONFIG_USE_DEFAULT_ENV_FILE=y` + pre-build hook to stage `env.txt`). Currently lives only in flashed `uboot-env.bin`; compiled-in fallback is missing. FR-4.4 defense case.
+
+### 11.2 Phase 4 — OTA update layer
+
+**Software scaffolding (present — to be verified end-to-end):**
+- [~] `ota-check` script (FR-3.1, FR-3.2, FR-3.3, FR-3.7) — in `board/linxdot/overlay/usr/sbin/ota-check`.
+- [~] `S99otacheck` boot-time hook (FR-3.1) — in overlay init.d.
+- [~] `S98confirm` health gate (FR-4.1, FR-4.2) — in overlay init.d.
+- [~] `sw-description.tmpl` (FR-3.3, FR-3.5) — in `board/linxdot/swupdate/`.
+- [~] `scripts/gen-signing-key.sh` (FR-3.5, signing-key lifecycle) — keypair generator.
+- [~] CI `.swu` build + signing + `manifest.json` emission (per commit d54e9b3) — wired but not exercised on device.
+
+**Hardware validation (blocked until Phase 3 closes):**
+- [ ] **TC-4.1** SWU packaging static test (`tests/test_swu_packaging.sh`) — verify CI output shape.
+- [ ] **TC-4.2** Image-layout partition check (`tests/test_image_layout.sh`) against run-24827994009 artifact.
+- [ ] **TC-4.3** Signature required — unsigned `.swu` is refused.
+- [ ] **TC-4.4** End-to-end happy path — tagged release picked up, inactive slot updated, commit succeeds.
+- [ ] **TC-4.5** End-to-end rollback — broken release rolls back within `bootlimit` cycles.
+- [ ] **TC-4.6** Manual trigger (`ssh root@<device> ota-check`).
+
+### 11.3 Phase 5 — Curated in-tree DTS (not started)
+
+- [ ] Replace vendor `rk3566-linxdot.dtb` with in-tree DTS covering all peripherals (eth, WiFi, SPI for SX1302, eMMC, USB, UART2 @ 1.5 Mbaud).
+- [ ] Remove C-2 console-baud constraint once DTS is in-tree.
+
+### 11.4 Housekeeping
+
+- [ ] Hardware validation runbook (see §11.1).
+- [ ] Prune Phase 1 vendor blobs from `board/linxdot/blobs/` (`idbloader.img`, `u-boot.itb`) once Phase 3 is hardware-validated and the branch merges — currently kept as a rollback fallback for the pre-A/B migration path (C-5, §7.4).
+- [ ] Migrate CLAUDE.md to describe the merged (Phase 3+) baseline once `OTA` → `main`.
+
