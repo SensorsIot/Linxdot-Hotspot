@@ -21,13 +21,6 @@ echo ">>> Copying prebuilt kernel Image and DTB"
 cp "${BOARD_DIR}/blobs/Image" "${BINARIES_DIR}/"
 cp "${BOARD_DIR}/blobs/rk3566-linxdot.dtb" "${BINARIES_DIR}/"
 
-# ── Copy boot blobs for genimage ──
-# When Buildroot builds U-Boot from source (Phase 3), idbloader.img and
-# u-boot.itb already exist in BINARIES_DIR — don't overwrite with stale blobs.
-echo ">>> Ensuring boot blobs present in BINARIES_DIR"
-[ -f "${BINARIES_DIR}/idbloader.img" ] || cp "${BOARD_DIR}/blobs/idbloader.img" "${BINARIES_DIR}/"
-[ -f "${BINARIES_DIR}/u-boot.itb" ] || cp "${BOARD_DIR}/blobs/u-boot.itb" "${BINARIES_DIR}/"
-
 # ── Install kernel modules ──
 echo ">>> Installing kernel modules to rootfs"
 MODULES_SRC="${BOARD_DIR}/modules/5.15.104"
