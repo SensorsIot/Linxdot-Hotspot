@@ -41,7 +41,7 @@ BR2_TARGET_ARM_TRUSTED_FIRMWARE_IMAGES="bl31/bl31.elf"
 # Rockchip DDR init blob (proprietary, required for RK356x — see FSD §3.3, §10.1).
 # rk3568 TPL at 1560 MHz is used on RK3566 LPDDR4/4x boards like the LD1001.
 BR2_PACKAGE_ROCKCHIP_RKBIN=y
-BR2_PACKAGE_ROCKCHIP_RKBIN_TPL_FILENAME="bin/rk35/rk3568_ddr_1560MHz_v1.23.bin"
+BR2_PACKAGE_ROCKCHIP_RKBIN_TPL_FILENAME="bin/rk35/rk3568_ddr_1560MHz_v1.18.bin"
 
 # Init system
 BR2_INIT_BUSYBOX=y
