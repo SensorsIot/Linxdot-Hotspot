@@ -27,8 +27,12 @@ BR2_TARGET_UBOOT_NEEDS_ROCKCHIP_RKBIN=y
 # Do not select FORMAT_ITB / SPL_NAME — the unified blob is installed via
 # the NEEDS_ROCKCHIP_RKBIN post-install hook and written at offset 32K.
 
-# TF-A — built from source (Phase 3); RK3566 uses rk3568 platform by convention.
-# v2.12.0 is the first upstream release with plat/rockchip/rk3568; v2.10/v2.11 lack it.
+# TF-A — source build is force-selected by BR2_TARGET_UBOOT_NEEDS_ATF_BL31 above.
+# Kept enabled for that reason, but the BL31 it produces is OVERRIDDEN at the
+# U-Boot make step by ROCKCHIP_RKBIN_BL31_FILENAME (see below). TF-A v2.12.0
+# lacks the Rockchip-vendor SIP SMCs that the vendor 5.15 kernel calls into —
+# swapping in rkbin's rk3568_bl31_v1.45.elf unblocks Linux boot. Revisit when
+# Phase 2 (mainline kernel from source) lands and we no longer need those SMCs.
 BR2_TARGET_ARM_TRUSTED_FIRMWARE=y
 BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION=y
 BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION_VALUE="v2.12.0"
@@ -37,10 +41,14 @@ BR2_TARGET_ARM_TRUSTED_FIRMWARE_BL31=y
 # Rockchip TF-A emits bl31.elf (not *.bin); U-Boot consumes ELF directly.
 BR2_TARGET_ARM_TRUSTED_FIRMWARE_IMAGES="bl31/bl31.elf"
 
-# Rockchip DDR init blob (proprietary, required for RK356x — see FSD §3.3, §10.1).
-# rk3568 TPL at 1560 MHz is used on RK3566 LPDDR4/4x boards like the LD1001.
+# Rockchip proprietary firmware blobs (see FSD §3.3, §10.1):
+#   - DDR init TPL (required for RK356x DRAM bring-up)
+#   - Vendor BL31 (overrides TF-A's — same rkbin version rkbin's own
+#     RKTRUST/RK3568TRUST.ini references, canonical for this SoC)
+# U-Boot's make opts append this BL31= after TF-A's, so rkbin wins.
 BR2_PACKAGE_ROCKCHIP_RKBIN=y
 BR2_PACKAGE_ROCKCHIP_RKBIN_TPL_FILENAME="bin/rk35/rk3568_ddr_1560MHz_v1.18.bin"
+BR2_PACKAGE_ROCKCHIP_RKBIN_BL31_FILENAME="bin/rk35/rk3568_bl31_v1.45.elf"
 
 # Init system
 BR2_INIT_BUSYBOX=y
