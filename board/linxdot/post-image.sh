@@ -28,8 +28,12 @@ echo ">>> Compiling boot.cmd to boot.scr"
     -d "${BOARD_DIR}/boot.cmd" "${BINARIES_DIR}/boot.scr"
 
 # ── Generate U-Boot env image (64K primary + 64K redundant) ──
+# -r adds the 1-byte "active" flag after the CRC32 — required when U-Boot is
+# built with CONFIG_SYS_REDUNDAND_ENVIRONMENT, otherwise U-Boot reads the old
+# non-redundant layout, can't parse it, and falls back to default env (so
+# altbootcmd, bootcount, boot_slot etc. are missing on first boot).
 echo ">>> Generating uboot-env.bin"
-"$MKENVIMAGE" -s 0x10000 -o "${BINARIES_DIR}/uboot-env-primary.bin" \
+"$MKENVIMAGE" -r -s 0x10000 -o "${BINARIES_DIR}/uboot-env-primary.bin" \
     "${BOARD_DIR}/uboot/env.txt"
 cat "${BINARIES_DIR}/uboot-env-primary.bin" "${BINARIES_DIR}/uboot-env-primary.bin" \
     > "${BINARIES_DIR}/uboot-env.bin"
