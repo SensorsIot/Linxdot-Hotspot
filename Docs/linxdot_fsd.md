@@ -571,7 +571,7 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - [x] Physical flashing path from Workbench Pi (`rkdeveloptool` via routed USB-C at SLOT1/2, `boot_merger`-packed loader for `db` — see runbook §0 + §8.2).
 - [x] Runbook `Docs/phase3_hardware_validation.md` covering BootROM check, flashing, and TC-3.3..TC-3.6 procedures with pass criteria.
 - [x] **TC-3.3** Built U-Boot boots to Linux login on hardware — signed off 2026-04-23 on the Workbench LD1001 at 192.168.0.142 (run 24854453113, commit `01e3fd7`). Full chain: vendor DDR TPL → our SPL 2024.04 → FIT hash verify → rkbin BL31 v1.43 → U-Boot 2024.04 → autoboot → kernel → BusyBox userspace → dropbear + Docker + SWUpdate all started.
-- [ ] **TC-3.4** `fw_setenv` / `fw_printenv` round-trip from userspace.
+- [x] **TC-3.4** `fw_setenv` / `fw_printenv` round-trip from userspace — signed off 2026-04-24 on the Workbench LD1001 at 192.168.0.142 (CI run `24878716437`, commit `14e0887`). Cold-boot verified: shipped `uboot-env.bin` is redundant-format (CRC + flag=`0x01` + data), `altbootcmd` and full A/B state load from `env.txt`, `fw_setenv`/`fw_printenv` round-trip succeeds with no warnings, second write ping-pongs to the other copy with incremented flag.
 - [ ] **TC-3.5** Healthy-slot transient resilience (crashes before commit → bootcount reset, slot not flipped).
 - [ ] **TC-3.6** Broken-slot rollback (`altbootcmd` flips slot after `bootlimit` failures).
 
@@ -581,6 +581,12 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - Local builds need `git lfs pull` before `post-build.sh`; the prebuilt kernel Image + DTB in `board/linxdot/blobs/` are LFS pointers otherwise.
 - TF-A v2.12.0 was the planned BL31; switched to vendor rkbin BL31 v1.43 after hardware proved mainline TF-A doesn't implement the Rockchip SIP SMCs the vendor 5.15 kernel calls. Revisit when Phase 2 (mainline kernel) lands.
 - Phase 3 permanently removes the vendor BT-Pair → Loader shortcut (vendor-SPL feature). Post-Phase-3 re-flash path is `serial Ctrl-C spam → U-Boot prompt → mw.l 0xfdc20200 0xef08a53c; reset → Maskrom → db → wl`. Fully documented in runbook §1.1 and §8.1.
+
+**Session-4 learnings captured in code (commits `a4cafbb`, `14e0887`):**
+- `/etc/fw_env.config` must reference `/dev/mmcblk1` (Linux's view of eMMC), not `/dev/mmcblk0` — same U-Boot-vs-Linux numbering mismatch as `root=`. Shipped overlay was wrong; `fw_printenv` returned "Cannot initialize environment".
+- `CONFIG_ENV_OFFSET_REDUND` alone does *not* enable redundant env — `CONFIG_SYS_REDUNDAND_ENVIRONMENT=y` is also required. Without it U-Boot writes only the primary copy; power-loss mid-`saveenv` leaves no valid env → device unbootable.
+- `mkenvimage` must be called with `-r` when the target U-Boot has redundant env enabled. `-r` inserts the 1-byte "active" flag between CRC32 and env data; without it U-Boot can't parse the shipped env and falls back to compiled-in defaults (losing `altbootcmd` / `bootcount` / `boot_slot` from `env.txt`).
+- In-place image flash from the running device (`xz -dc /tmp/new.img.xz | dd of=/dev/mmcblk1; sysrq b`) is a faster alternative to the Maskrom dance when the device is booted and reachable — about 90 seconds end-to-end, no serial pre-arm needed.
 
 **Defense-in-depth (open — non-blocking):**
 - [ ] Bake `altbootcmd` into U-Boot compiled-in default env (via `CONFIG_USE_DEFAULT_ENV_FILE=y` + pre-build hook to stage `env.txt`). Currently lives only in flashed `uboot-env.bin`; compiled-in fallback is missing. FR-4.4 defense case.
