@@ -14,14 +14,14 @@ software =
                 images: (
                     {
                         filename = "rootfs.ext4";
-                        device = "/dev/mmcblk0p4";
+                        device = "/dev/mmcblk1p4";
                         type = "raw";
                         installed-directly = true;
                         sha256 = "@SHA_ROOTFS@";
                     },
                     {
                         filename = "boot.vfat";
-                        device = "/dev/mmcblk0p3";
+                        device = "/dev/mmcblk1p3";
                         type = "raw";
                         installed-directly = true;
                         sha256 = "@SHA_BOOT@";
@@ -40,14 +40,14 @@ software =
                 images: (
                     {
                         filename = "rootfs.ext4";
-                        device = "/dev/mmcblk0p2";
+                        device = "/dev/mmcblk1p2";
                         type = "raw";
                         installed-directly = true;
                         sha256 = "@SHA_ROOTFS@";
                     },
                     {
                         filename = "boot.vfat";
-                        device = "/dev/mmcblk0p1";
+                        device = "/dev/mmcblk1p1";
                         type = "raw";
                         installed-directly = true;
                         sha256 = "@SHA_BOOT@";

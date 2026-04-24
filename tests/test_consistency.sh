@@ -97,15 +97,15 @@ done
 SWDESC="$REPO/board/linxdot/swupdate/sw-description.tmpl"
 if [ -f "$SWDESC" ]; then
     # target-B must reference p3 (boot_b) and p4 (rootfs_b)
-    awk '/target-B:/,/target-A:/' "$SWDESC" | grep -q 'mmcblk0p3' \
-        || err "sw-description target-B must write to /dev/mmcblk0p3 (boot_b)"
-    awk '/target-B:/,/target-A:/' "$SWDESC" | grep -q 'mmcblk0p4' \
-        || err "sw-description target-B must write to /dev/mmcblk0p4 (rootfs_b)"
+    awk '/target-B:/,/target-A:/' "$SWDESC" | grep -q 'mmcblk1p3' \
+        || err "sw-description target-B must write to /dev/mmcblk1p3 (boot_b)"
+    awk '/target-B:/,/target-A:/' "$SWDESC" | grep -q 'mmcblk1p4' \
+        || err "sw-description target-B must write to /dev/mmcblk1p4 (rootfs_b)"
     # target-A must reference p1 (boot_a) and p2 (rootfs_a)
-    awk '/target-A:/,/^\}/' "$SWDESC" | grep -q 'mmcblk0p1' \
-        || err "sw-description target-A must write to /dev/mmcblk0p1 (boot_a)"
-    awk '/target-A:/,/^\}/' "$SWDESC" | grep -q 'mmcblk0p2' \
-        || err "sw-description target-A must write to /dev/mmcblk0p2 (rootfs_a)"
+    awk '/target-A:/,/^\}/' "$SWDESC" | grep -q 'mmcblk1p1' \
+        || err "sw-description target-A must write to /dev/mmcblk1p1 (boot_a)"
+    awk '/target-A:/,/^\}/' "$SWDESC" | grep -q 'mmcblk1p2' \
+        || err "sw-description target-A must write to /dev/mmcblk1p2 (rootfs_a)"
     # both targets must set upgrade_available=1
     count=$(grep -c 'upgrade_available";[[:space:]]*value[[:space:]]*=[[:space:]]*"1"' "$SWDESC")
     [ "$count" -eq 2 ] || err "sw-description must set upgrade_available=1 in both target-A and target-B (found $count)"
