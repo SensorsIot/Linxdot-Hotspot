@@ -50,10 +50,11 @@ case "$1" in
             /data/overlay/usr/work \
             /usr
 
-        mount_overlay /var/log \
-            /data/overlay/var_log/upper \
-            /data/overlay/var_log/work \
-            /var/log
+        # /var/log is a symlink to ../tmp (Buildroot default), so an overlay
+        # here silently targets /tmp after path resolution — which clobbers
+        # the tmpfs mounted by S00datapart and backs /tmp with /data's
+        # partition. 500 MB OTA downloads then fill /data. See TC-4.4 session.
+        # Log files live in tmpfs; losing them across reboots is intentional.
 
         mount_overlay /var/lib \
             /data/overlay/var_lib/upper \

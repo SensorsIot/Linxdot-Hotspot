@@ -47,9 +47,20 @@ fi
 
 SWU=/tmp/update.swu
 rm -f "$SWU"
+
+# Pre-flight: ensure /tmp has enough room for the .swu. Catches the case
+# where /tmp is unexpectedly backed by a small filesystem (see S01mountall
+# /var/log-overlay bug) before we burn network bandwidth on a doomed curl.
+REMOTE_SIZE=$(sed -n 's/.*"size"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$MANIFEST")
+TMP_FREE_KB=$(df -P /tmp | awk 'NR==2 {print $4}')
+TMP_FREE=$(( TMP_FREE_KB * 1024 ))
+if [ -n "$REMOTE_SIZE" ] && [ "$TMP_FREE" -lt "$REMOTE_SIZE" ]; then
+    die "insufficient free space in /tmp ($TMP_FREE B) for .swu ($REMOTE_SIZE B)"
+fi
+
 log "downloading $REMOTE_URL"
 curl -fsS --max-time 600 -L "$REMOTE_URL" -o "$SWU" \
-    || die "download failed"
+    || { rm -f "$SWU"; die "download failed"; }
 
 if [ -n "$REMOTE_SHA" ]; then
     GOT=$(sha256sum "$SWU" | cut -d' ' -f1)

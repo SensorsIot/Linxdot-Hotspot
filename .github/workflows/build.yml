@@ -400,10 +400,12 @@ jobs:
           cd work/images
           SWU="linxdot-basics-station-${VERSION}.swu"
           SHA=$(sha256sum "$SWU" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$SWU")
           cat > manifest.json <<EOF
           {
             "version": "$VERSION",
             "url": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$SWU",
+            "size": $SIZE,
             "sha256": "$SHA"
           }
           EOF
