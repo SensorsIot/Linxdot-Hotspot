@@ -110,6 +110,7 @@ jobs:
             board/linxdot/uboot/linxdot.fragment \
             board/linxdot/uboot/env.txt \
             board/linxdot/post-build.sh \
+            board/linxdot/swupdate/swupdate.config \
             2>/dev/null | sha256sum | cut -d' ' -f1)
           echo "Current base hash: $CURRENT_HASH"
 
@@ -221,6 +222,9 @@ jobs:
 
       - name: Compute base hash
         id: hash
+        # Must match the detect-changes hash list exactly — if the two diverge,
+        # the stored hash will never equal what detect-changes computes and we
+        # rebuild every run (or worse, cache-hit stale artifacts).
         run: |
           CURRENT_HASH=$(cat \
             configs/linxdot_ld1001_defconfig \
@@ -229,6 +233,10 @@ jobs:
             external.desc \
             package/docker-compose-v1/Config.in \
             package/docker-compose-v1/docker-compose-v1.mk \
+            board/linxdot/uboot/linxdot.fragment \
+            board/linxdot/uboot/env.txt \
+            board/linxdot/post-build.sh \
+            board/linxdot/swupdate/swupdate.config \
             2>/dev/null | sha256sum | cut -d' ' -f1)
           echo "hash=$CURRENT_HASH" >> "$GITHUB_OUTPUT"
 
