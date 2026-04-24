@@ -96,7 +96,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Hash all files that affect the base rootfs (packages, defconfig, build system)
+          # Hash all files that affect the base rootfs — anything Buildroot consumes
+          # during build. A file missing here means a silent cache hit on stale
+          # artifacts (we once shipped an old U-Boot for hours because the fragment
+          # wasn't in this list — session 5).
           CURRENT_HASH=$(cat \
             configs/linxdot_ld1001_defconfig \
             external.mk \
@@ -104,6 +107,9 @@ jobs:
             external.desc \
             package/docker-compose-v1/Config.in \
             package/docker-compose-v1/docker-compose-v1.mk \
+            board/linxdot/uboot/linxdot.fragment \
+            board/linxdot/uboot/env.txt \
+            board/linxdot/post-build.sh \
             2>/dev/null | sha256sum | cut -d' ' -f1)
           echo "Current base hash: $CURRENT_HASH"
 
