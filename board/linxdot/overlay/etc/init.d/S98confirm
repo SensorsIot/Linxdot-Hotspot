@@ -2,8 +2,12 @@
 # S98confirm — commit the current slot after a healthy trial boot.
 #
 # If upgrade_available=1 (we're trial-booting a newly-applied update),
-# wait for Docker + basicstation to come up, then clear the trial flags.
+# wait for the configured health condition, then clear the trial flags.
 # Otherwise U-Boot will roll us back on next reboot.
+#
+# Health condition is configurable via /etc/default/ota (baked into
+# the rootfs) and /data/ota.conf (persistent, overrides the default).
+# See the defaults file for the supported HEALTH_CHECK values.
 
 case "$1" in
     start) ;;
@@ -12,13 +16,35 @@ esac
 
 [ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ] || exit 0
 
+# Load defaults, then let /data/ota.conf override them.
+HEALTH_CHECK=full
+HEALTH_TIMEOUT=120
+[ -r /etc/default/ota ] && . /etc/default/ota
+[ -r /data/ota.conf ]   && . /data/ota.conf
+
 SLOT=$(fw_printenv -n boot_slot 2>/dev/null || echo "?")
-logger -t ota "trial boot of slot $SLOT — waiting up to 120s for services"
+logger -t ota "trial boot of slot $SLOT — health_check=$HEALTH_CHECK timeout=${HEALTH_TIMEOUT}s"
+
+is_healthy() {
+    case "$HEALTH_CHECK" in
+        always)
+            return 0 ;;
+        never)
+            return 1 ;;
+        minimal)
+            pgrep dockerd >/dev/null 2>&1 ;;
+        full|*)
+            pgrep dockerd >/dev/null 2>&1 \
+                && docker ps --format '{{.Names}}' 2>/dev/null | grep -q basicstation ;;
+    esac
+}
 
 HEALTHY=0
-for _ in $(seq 1 24); do
-    if pgrep dockerd >/dev/null 2>&1 \
-       && docker ps --format '{{.Names}}' 2>/dev/null | grep -q basicstation; then
+# Poll every 5s for up to HEALTH_TIMEOUT seconds.
+polls=$(( HEALTH_TIMEOUT / 5 ))
+[ "$polls" -lt 1 ] && polls=1
+for _ in $(seq 1 "$polls"); do
+    if is_healthy; then
         HEALTHY=1
         break
     fi
@@ -28,9 +54,9 @@ done
 if [ "$HEALTHY" -eq 1 ]; then
     fw_setenv upgrade_available 0
     fw_setenv bootcount 0
-    logger -t ota "slot $SLOT committed"
+    logger -t ota "slot $SLOT committed (health_check=$HEALTH_CHECK)"
 else
-    logger -t ota "slot $SLOT health check FAILED — rollback on next reboot"
+    logger -t ota "slot $SLOT health check FAILED (health_check=$HEALTH_CHECK) — rollback on next reboot"
 fi
 
 exit 0

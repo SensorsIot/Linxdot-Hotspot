@@ -1,0 +1,21 @@
+# OTA orchestration defaults.
+#
+# /data/ota.conf overrides these at boot if present (survives OTA updates
+# since /data is never touched by the SWUpdate bundle).
+#
+# HEALTH_CHECK
+#   full     (default, per FSD FR-4.1) dockerd + basicstation container must
+#            be running before S98confirm commits the trial-booted slot.
+#   minimal  dockerd alone is enough. Use when basicstation can't run because
+#            TC_KEY is unset, but you still want the OTA path exercised.
+#   always   report healthy immediately. Dev/CI only — skips the real gate.
+#   never    report unhealthy always. Forces U-Boot rollback on next bootcount
+#            overflow; used for TC-4.5 rollback tests.
+#
+# HEALTH_TIMEOUT
+#   Seconds to wait for the healthy condition. Default 120 matches FSD. Lower
+#   values speed up TC-4.5 rollback tests; higher values give a slow TTN
+#   handshake more room.
+#
+HEALTH_CHECK=full
+HEALTH_TIMEOUT=120
