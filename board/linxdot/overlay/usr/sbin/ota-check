@@ -68,7 +68,10 @@ if [ -n "$REMOTE_SHA" ]; then
 fi
 
 log "applying to slot $TARGET_SLOT"
-SWUPDATE_ARGS="-v -i $SWU -e stable,linxdot-ld1001,target-${TARGET_SLOT}"
+# Selector format: <software_set>,<running_mode>. SWUpdate splits only at the
+# first comma — "stable,linxdot-ld1001,target-B" would set running_mode to
+# the literal "linxdot-ld1001,target-B" which libconfig can't path-lookup.
+SWUPDATE_ARGS="-v -i $SWU -e stable,target-${TARGET_SLOT}"
 if [ -f "$PUBKEY" ]; then
     SWUPDATE_ARGS="$SWUPDATE_ARGS -k $PUBKEY"
 else

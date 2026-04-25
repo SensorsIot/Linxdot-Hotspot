@@ -95,6 +95,7 @@ done
 # The critical invariant: target-B writes to the INACTIVE slot when current is
 # A, i.e. rootfs_b (p4) and boot_b (p3). target-A writes when current is B.
 SWDESC="$REPO/board/linxdot/swupdate/sw-description.tmpl"
+OTACHK="$REPO/board/linxdot/overlay/usr/sbin/ota-check"
 if [ -f "$SWDESC" ]; then
     # target-B must reference p3 (boot_b) and p4 (rootfs_b)
     awk '/target-B:/,/target-A:/' "$SWDESC" | grep -q 'mmcblk1p3' \
@@ -109,6 +110,44 @@ if [ -f "$SWDESC" ]; then
     # both targets must set upgrade_available=1
     count=$(grep -c 'upgrade_available";[[:space:]]*value[[:space:]]*=[[:space:]]*"1"' "$SWDESC")
     [ "$count" -eq 2 ] || err "sw-description must set upgrade_available=1 in both target-A and target-B (found $count)"
+
+    # ── selector path must match sw-description structure ──────────────────
+    # SWUpdate's parse_image_selector splits at the FIRST comma only:
+    #   -e stable,target-B  →  set="stable",  mode="target-B"
+    # The parser then joins {set, mode} with '.' for libconfig path lookup,
+    # so sw-description MUST nest target-X exactly under software.<set>, with
+    # no extra hardware-name level in between.
+    #
+    # An rc7-era bug had selector "stable,linxdot-ld1001,target-B" against
+    # nested stable.linxdot-ld1001.target-B — looked plausible but failed at
+    # runtime with "Found nothing to install" (TC-4.4). This test catches it.
+    if [ -f "$OTACHK" ]; then
+        # Pull the selector argument from the SWUPDATE_ARGS line specifically;
+        # bare "-e" on other lines (e.g. `set -e`) would match a wider regex.
+        SEL=$(grep -E '^SWUPDATE_ARGS=' "$OTACHK" \
+              | sed -n 's/.*-e *\([a-zA-Z0-9,_${}-]*\).*/\1/p' | head -1)
+        SEL_MODE_TMPL=$(echo "$SEL" | sed 's/^[^,]*,//; s/\${TARGET_SLOT}/A/')
+        # Step 1: every comma in the resulting mode is a syntax error — the
+        # mode key must be a single libconfig identifier.
+        case "$SEL_MODE_TMPL" in
+            *,*) err "ota-check selector ($SEL) leaves running_mode='$SEL_MODE_TMPL' with a comma — libconfig can't traverse it" ;;
+        esac
+        # Step 2: software.<set>.<mode> must exist in sw-description as a
+        # group (i.e. immediate parent of images/bootenv).
+        SEL_SET=$(echo "$SEL" | sed 's/,.*//')
+        for slot in A B; do
+            mode=$(echo "$SEL_MODE_TMPL" | sed "s/A\$/$slot/")
+            # The structure should be: <set>: { ... <mode>: { ... images: ... } }
+            # We approximate by checking <mode>: appears as a direct nested key
+            # inside the <set>: { ... } block in sw-description.
+            if ! awk -v set="$SEL_SET:" -v mode="$mode:" '
+                $0 ~ set { in_set=1 }
+                in_set && $0 ~ mode { found=1 }
+                END { exit !found }' "$SWDESC"; then
+                err "selector path '$SEL_SET.$mode' (for target-$slot) not found in sw-description.tmpl structure"
+            fi
+        done
+    fi
 fi
 
 # ── altbootcmd in env.txt must reference both slots and clear upgrade_available
