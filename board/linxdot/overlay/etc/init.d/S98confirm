@@ -32,9 +32,9 @@ is_healthy() {
         never)
             return 1 ;;
         minimal)
-            pgrep dockerd >/dev/null 2>&1 ;;
+            pidof dockerd >/dev/null 2>&1 ;;
         full|*)
-            pgrep dockerd >/dev/null 2>&1 \
+            pidof dockerd >/dev/null 2>&1 \
                 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q basicstation ;;
     esac
 }

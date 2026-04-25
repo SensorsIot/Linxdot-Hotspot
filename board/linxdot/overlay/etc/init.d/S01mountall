@@ -10,8 +10,17 @@ mount_overlay() {
     target="$4"
 
     mkdir -p "$upper" "$work" "$target"
+    # index=off,xino=off,redirect_dir=off — required for A/B updates.
+    # On the second slot's first boot the lowerdir is a *different* ext4
+    # filesystem with different inode numbers than when the upperdir was
+    # first populated. With index/xino on, overlayfs reads the cached
+    # origin file handle and rejects the mount with err=-116 (ESTALE):
+    #   overlayfs: failed to verify origin (/usr, ino=901, err=-116)
+    #   overlayfs: failed to verify upper root origin
+    # …leaving / read-only on slot B. Disabling origin verification lets
+    # the same upper layer ride along across slot flips.
     mount -t overlay overlay \
-        -o "lowerdir=${lower},upperdir=${upper},workdir=${work}" \
+        -o "lowerdir=${lower},upperdir=${upper},workdir=${work},index=off,xino=off,redirect_dir=off" \
         "$target"
 }
 

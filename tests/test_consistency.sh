@@ -15,6 +15,8 @@ FWENV="$REPO/board/linxdot/overlay/etc/fw_env.config"
 GENIMG="$REPO/board/linxdot/genimage.cfg"
 ENV_TXT="$REPO/board/linxdot/uboot/env.txt"
 SWUPDATE_CFG="$REPO/board/linxdot/swupdate/swupdate.config"
+S01MOUNTALL="$REPO/board/linxdot/overlay/etc/init.d/S01mountall"
+S98CONFIRM="$REPO/board/linxdot/overlay/etc/init.d/S98confirm"
 
 fail=0
 
@@ -162,6 +164,39 @@ if [ -f "$SWDESC" ]; then
                 err "selector path '$SEL_SET.$mode' (for target-$slot) not found in sw-description.tmpl structure"
             fi
         done
+    fi
+fi
+
+# ── busybox-only userspace must not call pgrep ─────────────────────────────
+# Buildroot's busybox doesn't ship pgrep (only pidof). A stray `pgrep` in any
+# init script returns 127 silently and flips a healthy state to "failed" —
+# TC-4.4 trial-boot of slot B "FAILED" on rc12 because S98confirm called
+# pgrep dockerd while dockerd was running fine.
+for f in "$REPO"/board/linxdot/overlay/etc/init.d/S* \
+         "$REPO"/board/linxdot/overlay/usr/sbin/* ; do
+    [ -f "$f" ] || continue
+    if grep -qE '(^|[^[:alnum:]_])pgrep([[:space:]]|$)' "$f"; then
+        err "$f calls pgrep — busybox lacks pgrep; use pidof instead"
+    fi
+done
+
+# ── overlayfs mounts must disable origin verification for A/B layouts ───────
+# When the upper layer is on /data (shared between slots) and the lower
+# layer is /usr/etc/var/lib on the rootfs (different ext4 partitions on
+# slot A vs B → different inode numbers), overlayfs with default index=on
+# rejects the slot-B mount with "failed to verify upper root origin /
+# err=-116" and leaves the box read-only. index=off,xino=off keeps the
+# upper layer portable across slots.
+if [ -f "$S01MOUNTALL" ]; then
+    # Collapse line-continuations so a multi-line `mount -t overlay … \\\n
+    # -o "lowerdir=…,index=off,xino=off,…" \\\n target` becomes one logical
+    # line we can pattern-match.
+    JOINED=$(awk '/\\$/{sub(/\\$/,""); printf "%s",$0; next} {print}' "$S01MOUNTALL")
+    if printf '%s\n' "$JOINED" | grep -qE 'mount -t overlay'; then
+        printf '%s\n' "$JOINED" | grep -qE 'mount -t overlay.*index=off' \
+            || err "S01mountall: overlay mount missing index=off (slot-B will fail with ESTALE)"
+        printf '%s\n' "$JOINED" | grep -qE 'mount -t overlay.*xino=off' \
+            || err "S01mountall: overlay mount missing xino=off (slot-B will fail with ESTALE)"
     fi
 fi
 
