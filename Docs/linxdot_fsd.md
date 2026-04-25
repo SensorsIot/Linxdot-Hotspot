@@ -601,21 +601,36 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 
 ### 11.2 Phase 4 — OTA update layer
 
-**Software scaffolding (present — to be verified end-to-end):**
-- [~] `ota-check` script (FR-3.1, FR-3.2, FR-3.3, FR-3.7) — in `board/linxdot/overlay/usr/sbin/ota-check`.
-- [~] `S99otacheck` boot-time hook (FR-3.1) — in overlay init.d.
-- [~] `S98confirm` health gate (FR-4.1, FR-4.2) — in overlay init.d.
-- [~] `sw-description.tmpl` (FR-3.3, FR-3.5) — in `board/linxdot/swupdate/`.
-- [~] `scripts/gen-signing-key.sh` (FR-3.5, signing-key lifecycle) — keypair generator.
-- [~] CI `.swu` build + signing + `manifest.json` emission (per commit d54e9b3) — wired but not exercised on device.
+**Software scaffolding (present — verified end-to-end on rc12+):**
+- [x] `ota-check` script (FR-3.1, FR-3.2, FR-3.3, FR-3.7) — in `board/linxdot/overlay/usr/sbin/ota-check`.
+- [x] `S99otacheck` boot-time hook (FR-3.1) — in overlay init.d.
+- [x] `S98confirm` health gate (FR-4.1, FR-4.2) — in overlay init.d (configurable via `/data/ota.conf`).
+- [x] `sw-description.tmpl` (FR-3.3, FR-3.5) — in `board/linxdot/swupdate/`. Flat 2-level layout (`software.stable.target-{A,B}`).
+- [~] `scripts/gen-signing-key.sh` (FR-3.5, signing-key lifecycle) — keypair generator (CI integration pending — gates TC-4.3).
+- [x] CI `.swu` build + `manifest.json` (with `size` field for pre-flight) emission — exercised on rc11→rc12.
 
-**Hardware validation (blocked until Phase 3 closes):**
-- [ ] **TC-4.1** SWU packaging static test (`tests/test_swu_packaging.sh`) — verify CI output shape.
-- [ ] **TC-4.2** Image-layout partition check (`tests/test_image_layout.sh`) against run-24827994009 artifact.
-- [ ] **TC-4.3** Signature required — unsigned `.swu` is refused.
-- [ ] **TC-4.4** End-to-end happy path — tagged release picked up, inactive slot updated, commit succeeds.
-- [ ] **TC-4.5** End-to-end rollback — broken release rolls back within `bootlimit` cycles.
-- [ ] **TC-4.6** Manual trigger (`ssh root@<device> ota-check`).
+**Hardware validation (in progress on Workbench LD1001):**
+- [x] **TC-4.1** SWU packaging static test (`tests/test_swu_packaging.sh`) — CI green from rc1 onward.
+- [x] **TC-4.2** Image-layout partition check (`tests/test_image_layout.sh`) — CI green from rc1 onward.
+- [ ] **TC-4.3** Signature required — pending keypair deployment + `CONFIG_SIGNED_IMAGES=y`.
+- [~] **TC-4.4** End-to-end happy path — SWUpdate apply path PROVEN end-to-end on rc11→rc12 (slot B booted with VERSION_ID=0.4.0-rc12, boot env staged correctly). Auto-commit blocked by two latent bugs fixed in `e3e77d8` (rc13): S98confirm `pgrep`/busybox mismatch and overlayfs slot-portability — full sign-off pending rc13→rc14 retest.
+- [ ] **TC-4.5** End-to-end rollback — pending TC-4.4 close.
+- [x] **TC-4.6** Manual trigger (`ssh root@<device> ota-check`) — exercised in rc7 / rc11; flow matches FR-3.2.
+
+**Session-6 learnings captured in code (commits `c36c7e8`, `09cf861`, `a983d88`, `aa01e4f`, `b3ccf3e`, `fc79f0d`, `0e4cbf5`, `e3e77d8`):**
+
+The Phase 4 hardware bring-up peeled four nested SWUpdate-config bugs and two userspace bugs, none of which any prior CI signal caught. Each got a matching test_consistency.sh check on the way out so the same drift is caught at PR-time instead of "swupdate rejects bundle on hardware" time.
+
+- **SWUpdate Kconfig name discipline.** Upstream's bootloader Kconfig is just `CONFIG_UBOOT` (not `CONFIG_BOOTLOADER_UBOOT`); `CONFIG_LIBCONFIG=y` requires `HAVE_LIBCONFIG` from a Buildroot-level `BR2_PACKAGE_LIBCONFIG=y`. `olddefconfig` silently drops misnamed symbols — an earlier swupdate.config shipped with `BOOTLOADER_NONE=y, SSL_IMPL_NONE=y, no LIBCONFIG`, so swupdate parsed nothing and rejected every bundle. *No build-time error, no runtime hint until you read the trace and see "Registered bootloaders: none loaded".*
+- **Selector splits at FIRST comma only, then joins with `.`.** SWUpdate's `parse_image_selector` (`core/parser.c`) takes `-e <set>,<mode>` and assigns `set = first segment`, `mode = entire remainder including any further commas`. The libconfig parser then constructs path `software.<set>.<mode>` and runs a single `config_lookup` (`corelib/parsing_library_libconfig.c::find_root_libconfig` → `mstrcat(nodes, ".")`). A nested `software.stable.linxdot-ld1001.target-B` group is unreachable from selector `stable,linxdot-ld1001,target-B` — that asks for `software → stable → "linxdot-ld1001,target-B"` (a single key with embedded comma). Flatten sw-description so `<mode>` is a single libconfig key.
+- **Bootloader plugin ≠ bootloader handler.** `CONFIG_UBOOT=y` registers the libubootenv-backed *plugin* that knows how to talk to the U-Boot env. It does NOT register an *image handler* for `bootenv:` sections in sw-description. `core/parser.c:184` requires `find_handler("uboot")` or `find_handler("bootenv")` before accepting any bundle that touches the bootloader env — both come from `handlers/boot_handler.c`, gated on a separate `CONFIG_BOOTLOADERHANDLER=y`. Without it, parse-time error is `"bootloader support absent but sw-description has bootloader section!"` even though `print_registered_bootloaders` says `uboot loaded`.
+- **busybox userspace lacks `pgrep`.** `S98confirm`'s health check called `pgrep dockerd >/dev/null 2>&1`. Buildroot's busybox ships `pidof` but not `pgrep`. Result: `pgrep` returned 127 (command not found), shell saw non-zero, `is_healthy` returned false, S98confirm logged "FAILED" and queued a rollback after the 60 s timeout — even though dockerd was running fine. `pidof dockerd >/dev/null 2>&1` is the busybox-friendly fix. Static check now greps every overlay shell script for a stray `pgrep`.
+- **Overlayfs slot-portability needs `index=off,xino=off,redirect_dir=off`.** A/B layouts share one /data partition (overlay upper) but flip between two rootfs partitions (overlay lower) at every commit. With default `index=on/xino=on`, overlayfs caches origin file-handle hints from the FIRST mount's lowerdir; on slot-B's first boot the lowerdir is a different ext4 fs with different inodes, and the kernel rejects the mount with `failed to verify upper root origin / err=-116 (ESTALE)`. /usr, /var/lib, /etc all stay read-only and S98confirm can't even rewrite scripts. Fix in `S01mountall::mount_overlay` adds the three `*_off` options. Static check requires both `index=off` and `xino=off` in any `mount -t overlay` line (multi-line continuation handled).
+- **`/var/log -> ../tmp` symlink + S01mountall overlay collision** (rc5). Mounting an overlay at `/var/log` resolves through the symlink onto `/tmp`, replacing the S00datapart tmpfs with a `/data`-backed overlay. 500 MB OTA downloads then fill `/data`'s 487 MiB. `S01mountall` no longer overlays `/var/log` — log files live in tmpfs and are intentionally lost across reboots. `ota-check` also gained a pre-flight check: refuse to download if `/tmp` free space < `manifest.size` (the `size` field added to `manifest.json` for this).
+- **Concurrent `ota-check` race on `/tmp/update.swu`.** Boot-time `S99otacheck` (60 s after boot) and a manual `ota-check` both `rm -f /tmp/update.swu` before curl — the second invocation can unlink while the first is still curling, manifesting as `curl: (23) Failure writing output to destination`. Open: `flock` or PID guard around the download. Today's TC-4.4 retry succeeded on the second manual run after the boot job finished.
+- **Vendor 5.15 kernel rejects genimage's metadata_csum'd `data.ext4`.** First boot of any fresh image hits `EXT4-fs error (mmcblk1p5): iget: checksum invalid` and `mount failed`. `S00datapart`'s `e2fsck -pf` + `resize2fs` recovers it on subsequent boots, but the FIRST boot of a fresh image lands without `/data` mounted (and therefore without overlays). Open: pass `-O ^metadata_csum,^metadata_csum_seed` to genimage's mke2fs invocation, or have `S00datapart` `mkfs.ext4 -F` if the first mount fails.
+- **CI base hash must cover every file the release job re-applies.** The base-hash list in `.github/workflows/build.yml` gates the cached-rootfs reuse, but the release job re-applies `board/linxdot/overlay/`, `board/linxdot/swupdate/sw-description.tmpl`, `board/linxdot/genimage.cfg`, and `board/linxdot/post-image.sh` on every run — these are NOT in the base hash by design (they're part of the fast release pass), so they pick up changes without a 40-min full rebuild. `swupdate.config` IS in the base hash (it gates Buildroot's `make swupdate` recompile). Drift-debugging takeaway: when a fix to an overlay file appears not to take effect, the release log's "Applying overlay…" line is the source of truth, not the base build.
+- **`swupdate.config` is the source of truth for the swupdate binary.** The buildroot package wrapper passes the kconfig file through `make olddefconfig` and links against host libs gated by `BR2_PACKAGE_*` env vars (HAVE_LIBSSL/HAVE_LIBCONFIG/HAVE_LIBUBOOTENV). Misnamed kconfig symbols are silently dropped; missing BR2 packages disable the corresponding feature even if the swupdate-side symbol is set. The pairing of the two has to be right for the binary to actually have the feature compiled in.
 
 ### 11.3 Phase 5 — Curated in-tree DTS (not started)
 
