@@ -613,7 +613,7 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - [x] **TC-4.1** SWU packaging static test (`tests/test_swu_packaging.sh`) — CI green from rc1 onward.
 - [x] **TC-4.2** Image-layout partition check (`tests/test_image_layout.sh`) — CI green from rc1 onward.
 - [ ] **TC-4.3** Signature required — pending keypair deployment + `CONFIG_SIGNED_IMAGES=y`.
-- [~] **TC-4.4** End-to-end happy path — SWUpdate apply path PROVEN end-to-end on rc11→rc12 (slot B booted with VERSION_ID=0.4.0-rc12, boot env staged correctly). Auto-commit blocked by two latent bugs fixed in `e3e77d8` (rc13): S98confirm `pgrep`/busybox mismatch and overlayfs slot-portability — full sign-off pending rc13→rc14 retest.
+- [x] **TC-4.4** End-to-end happy path — signed off 2026-04-25 on the Workbench LD1001 (rc12 → rc13 OTA). Sequence on slot A's first boot: SSH up at 08:06:09 → S98confirm logged `trial boot of slot A — health_check=minimal timeout=60s` at 08:06:13 → `slot A committed (health_check=minimal)` < 1 s later (dockerd's pidof match). Final state: `VERSION_ID=0.4.0-rc13`, `boot_slot=A`, `upgrade_available=0`, `bootcount=0`, all three overlays (`/usr`, `/var/lib`, `/etc`) re-mounted with `index=off,xino=off,redirect_dir=off,metacopy=off` on the *new* slot's lowerdir without ESTALE — proving slot-portability. No human intervention from `ota-check` invocation through commit.
 - [ ] **TC-4.5** End-to-end rollback — pending TC-4.4 close.
 - [x] **TC-4.6** Manual trigger (`ssh root@<device> ota-check`) — exercised in rc7 / rc11; flow matches FR-3.2.
 
