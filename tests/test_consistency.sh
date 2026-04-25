@@ -14,6 +14,7 @@ FRAG="$REPO/board/linxdot/uboot/linxdot.fragment"
 FWENV="$REPO/board/linxdot/overlay/etc/fw_env.config"
 GENIMG="$REPO/board/linxdot/genimage.cfg"
 ENV_TXT="$REPO/board/linxdot/uboot/env.txt"
+SWUPDATE_CFG="$REPO/board/linxdot/swupdate/swupdate.config"
 
 fail=0
 
@@ -110,6 +111,20 @@ if [ -f "$SWDESC" ]; then
     # both targets must set upgrade_available=1
     count=$(grep -c 'upgrade_available";[[:space:]]*value[[:space:]]*=[[:space:]]*"1"' "$SWDESC")
     [ "$count" -eq 2 ] || err "sw-description must set upgrade_available=1 in both target-A and target-B (found $count)"
+
+    # ── if sw-description uses bootenv: sections, swupdate must register a
+    # bootloader *handler* (not just the plugin). CONFIG_UBOOT enables the
+    # plugin (libubootenv); CONFIG_BOOTLOADERHANDLER enables boot_handler.c
+    # which registers the "uboot"/"bootloader" handler that core/parser.c
+    # looks up before accepting the bundle. With one but not the other,
+    # apply fails at runtime with "bootloader support absent but
+    # sw-description has bootloader section!" (TC-4.4 second attempt, rc10).
+    if grep -q '^[[:space:]]*bootenv:' "$SWDESC" && [ -f "$SWUPDATE_CFG" ]; then
+        grep -q '^CONFIG_UBOOT=y' "$SWUPDATE_CFG" \
+            || err "sw-description has bootenv: but swupdate.config missing CONFIG_UBOOT=y (plugin)"
+        grep -q '^CONFIG_BOOTLOADERHANDLER=y' "$SWUPDATE_CFG" \
+            || err "sw-description has bootenv: but swupdate.config missing CONFIG_BOOTLOADERHANDLER=y (handler)"
+    fi
 
     # ── selector path must match sw-description structure ──────────────────
     # SWUpdate's parse_image_selector splits at the FIRST comma only:
