@@ -114,7 +114,24 @@ if [ -f "$SWDESC" ]; then
     count=$(grep -c 'upgrade_available";[[:space:]]*value[[:space:]]*=[[:space:]]*"1"' "$SWDESC")
     [ "$count" -eq 2 ] || err "sw-description must set upgrade_available=1 in both target-A and target-B (found $count)"
 
-    # ── if sw-description uses bootenv: sections, swupdate must register a
+    # ── signing path: public key in overlay <=> CONFIG_SIGNED_IMAGES=y ─────────
+# CI signs sw-description with `openssl dgst -sha256 -sign` (raw
+# RSA-PKCS1v15) when the OTA_SIGNING_KEY secret is set; deployed devices
+# verify with /etc/swupdate/public.pem from the rootfs overlay. swupdate
+# only honours `-k <pubkey>` when CONFIG_SIGNED_IMAGES=y — without it the
+# binary prints `invalid option -- 'k'` and quietly accepts every bundle.
+PUBKEY="$REPO/board/linxdot/overlay/etc/swupdate/public.pem"
+if [ -f "$PUBKEY" ] && [ -f "$SWUPDATE_CFG" ]; then
+    grep -q '^CONFIG_SIGNED_IMAGES=y' "$SWUPDATE_CFG" \
+        || err "overlay ships public.pem but swupdate.config missing CONFIG_SIGNED_IMAGES=y (binary will reject -k flag)"
+    grep -q '^CONFIG_SIGALG_RAWRSA=y' "$SWUPDATE_CFG" \
+        || err "swupdate.config has CONFIG_SIGNED_IMAGES=y but no SIGALG selected — CI signs with raw RSA-PKCS1v15, set CONFIG_SIGALG_RAWRSA=y"
+fi
+if grep -q '^CONFIG_SIGNED_IMAGES=y' "$SWUPDATE_CFG" 2>/dev/null && [ ! -f "$PUBKEY" ]; then
+    err "swupdate.config has CONFIG_SIGNED_IMAGES=y but no overlay public.pem — every signed bundle will be rejected on-device"
+fi
+
+# ── if sw-description uses bootenv: sections, swupdate must register a
     # bootloader *handler* (not just the plugin). CONFIG_UBOOT enables the
     # plugin (libubootenv); CONFIG_BOOTLOADERHANDLER enables boot_handler.c
     # which registers the "uboot"/"bootloader" handler that core/parser.c
