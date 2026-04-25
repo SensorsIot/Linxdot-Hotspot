@@ -609,12 +609,12 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - [~] `scripts/gen-signing-key.sh` (FR-3.5, signing-key lifecycle) — keypair generator (CI integration pending — gates TC-4.3).
 - [x] CI `.swu` build + `manifest.json` (with `size` field for pre-flight) emission — exercised on rc11→rc12.
 
-**Hardware validation (in progress on Workbench LD1001):**
+**Hardware validation (Workbench LD1001 — happy path + rollback both PASS; TC-4.3 remaining):**
 - [x] **TC-4.1** SWU packaging static test (`tests/test_swu_packaging.sh`) — CI green from rc1 onward.
 - [x] **TC-4.2** Image-layout partition check (`tests/test_image_layout.sh`) — CI green from rc1 onward.
 - [ ] **TC-4.3** Signature required — pending keypair deployment + `CONFIG_SIGNED_IMAGES=y`.
 - [x] **TC-4.4** End-to-end happy path — signed off 2026-04-25 on the Workbench LD1001 (rc12 → rc13 OTA). Sequence on slot A's first boot: SSH up at 08:06:09 → S98confirm logged `trial boot of slot A — health_check=minimal timeout=60s` at 08:06:13 → `slot A committed (health_check=minimal)` < 1 s later (dockerd's pidof match). Final state: `VERSION_ID=0.4.0-rc13`, `boot_slot=A`, `upgrade_available=0`, `bootcount=0`, all three overlays (`/usr`, `/var/lib`, `/etc`) re-mounted with `index=off,xino=off,redirect_dir=off,metacopy=off` on the *new* slot's lowerdir without ESTALE — proving slot-portability. No human intervention from `ota-check` invocation through commit.
-- [ ] **TC-4.5** End-to-end rollback — pending TC-4.4 close.
+- [x] **TC-4.5** End-to-end rollback — signed off 2026-04-25 on the Workbench LD1001 (rc14 → rc15 OTA with `HEALTH_CHECK=never`). Boots after the OTA reboot: `boot 1: slot=A ua=1 bc=1 ver=rc15` → `boot 2: slot=A ua=1 bc=2 ver=rc15` → `boot 3: slot=A ua=1 bc=3 ver=rc15` (still under bootlimit) → `boot 4: slot=B ua=0 bc=0 ver=rc14` — bootcount overflowed (3→4 > limit 3), U-Boot ran `altbootcmd` which flipped `boot_slot` A→B, cleared `upgrade_available` and `bootcount`. Slot B's rc14 (the version that *was* committed before the failed upgrade) is back as the running version. End-to-end exercise of FR-4.4/4.6 from S98confirm-failure through to bootloader-driven recovery, no human intervention.
 - [x] **TC-4.6** Manual trigger (`ssh root@<device> ota-check`) — exercised in rc7 / rc11; flow matches FR-3.2.
 
 **Session-6 learnings captured in code (commits `c36c7e8`, `09cf861`, `a983d88`, `aa01e4f`, `b3ccf3e`, `fc79f0d`, `0e4cbf5`, `e3e77d8`):**
