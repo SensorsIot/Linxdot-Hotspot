@@ -247,9 +247,30 @@ jobs:
           gh release delete base-latest --yes 2>/dev/null || true
           git push origin :refs/tags/base-latest 2>/dev/null || true
 
+          cat > /tmp/base-notes.md <<EOF
+          **Internal CI artifact — not a user release.**
+
+          This pre-release holds the cached Buildroot base rootfs, the
+          unified bootloader blob, and the bundled host tools so the
+          \`release\` job can assemble a tagged firmware image in ~3
+          minutes instead of doing a 30-40 minute full rebuild on every
+          tag. It is regenerated automatically whenever any base-build
+          input changes (defconfig, U-Boot fragment, env, post-build,
+          \`swupdate.config\`, kernel blobs, modules — see the
+          \`detect-changes\` job).
+
+          End users should ignore this prerelease entirely; downloadable
+          firmware lives on the tagged releases (\`v1.0.0\` and later).
+
+          The line below is parsed by \`detect-changes\` to decide
+          whether a rebuild is needed — do not edit it manually.
+
+          BASE_HASH=${{ steps.hash.outputs.hash }}
+          EOF
+
           gh release create base-latest \
-            --title "Base rootfs ($(date -u +%Y-%m-%d))" \
-            --notes "BASE_HASH=${{ steps.hash.outputs.hash }}" \
+            --title "CI base rootfs cache (regenerated $(date -u +%Y-%m-%d))" \
+            --notes-file /tmp/base-notes.md \
             --prerelease \
             buildroot/output/images/rootfs.tar.xz \
             buildroot/output/images/u-boot-rockchip.bin \
