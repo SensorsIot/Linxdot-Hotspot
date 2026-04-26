@@ -91,13 +91,28 @@ vi /data/docker-compose.yml                           # TTS_REGION: eu1 | nam1 |
 
 ## Updates
 
-Devices running the A/B-layout firmware pick up new releases automatically — 60 s after boot, `ota-check` polls GitHub Releases, downloads any newer version, **verifies its RSA-4096 signature** against the public key embedded in the rootfs, applies it to the inactive slot, and reboots. Unsigned or tampered bundles are refused at install time. If the new slot fails its post-boot health check (Docker up, basicstation responding), U-Boot's bootcount mechanism flips back to the previous slot automatically — no manual recovery, no truck roll. `/data` (your TTN key, Docker images, config) is preserved across both updates and rollbacks.
+**What you do:** nothing — once a device is online and registered with TTN, it keeps itself current. Your TTN key, region setting, and any data on `/data` survive every update and every rollback.
 
-Trigger a check manually without rebooting:
+**When updates trigger:** **once per boot**, ~60 s after the network comes up. The `ota-check` script polls the GitHub Releases feed for this repo and installs the newest release if it's newer than what's running. There is **no periodic timer** — a gateway that stays powered on for weeks will keep its current version until something reboots it. If you want regular pickup on a 24/7 device, either schedule a weekly reboot or wire `ota-check` into a cron entry yourself.
+
+**Trigger a check manually**, no reboot required:
 
 ```bash
 ssh root@<device-ip> ota-check
 ```
+
+If a newer version is available it'll download, verify, install, and reboot — total time ~2-3 minutes including the reboot. Otherwise it logs "no update available" and exits.
+
+**What happens during an update:**
+
+1. `ota-check` fetches the `.swu` bundle (~30 MB) from GitHub Releases
+2. SWUpdate verifies the bundle's **RSA-4096 signature** against the public key embedded in the rootfs — unsigned or tampered bundles are refused before any disk write
+3. SWUpdate writes the new boot + rootfs to the **inactive A/B slot** (the running slot is untouched, so basicstation keeps serving traffic until the reboot)
+4. U-Boot env is flipped: `boot_slot` switches, `upgrade_available=1` arms a 3-reboot trial window
+5. Device reboots into the new slot — brief LoRa outage (~30-60 s) while basicstation comes back
+6. A boot-time `S98confirm` health check (Docker up, basicstation up) clears `upgrade_available` and commits the upgrade
+
+**If something goes wrong:** the new slot's health check doesn't pass → bootcount climbs past 3 → U-Boot's `altbootcmd` automatically flips back to the previous slot on the next boot. No screwdriver, no truck roll. The failed slot stays around for diagnostics; the next successful update overwrites it.
 
 **Migrating from a pre-A/B (Phase 1) image:** the A/B layout requires a one-time reflash. Back up `/data/basicstation/tc_key.txt` first — `/data` is recreated on reflash. Restore the key after flashing, and all subsequent updates arrive via OTA.
 
