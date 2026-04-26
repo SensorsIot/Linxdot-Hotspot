@@ -34,48 +34,56 @@ sudo apt-get install rkdeveloptool
 
 Put the Linxdot into Loader mode: with power disconnected, hold the **BT-Pair** button (near the antenna connector) and connect power. Keep holding for 5 s.
 
+> **One-time only.** BT-Pair is a vendor-bootloader feature; mainline U-Boot in OpenLinxdot ignores it. Future firmware updates use OTA over Ethernet, so this `rkdeveloptool` flash is the *only* time you'll need the USB cable. If you ever do need to re-flash (very rare), see [`Docs/linxdot_fsd.md`](Docs/linxdot_fsd.md) for the serial-console + Maskrom recovery procedure.
+
 ```bash
 sudo rkdeveloptool ld                            # should show "Loader"
 sudo rkdeveloptool wl 0 linxdot-basics-station.img
 sudo rkdeveloptool rd                            # reboot into new firmware
 ```
 
-Connect Ethernet and wait ~2 minutes for first boot. Future firmware updates arrive automatically over Ethernet — this reflash is the only time you'll need the USB cable.
+Connect Ethernet and wait ~2 minutes for first boot.
 
-### 3. Find the Gateway EUI
+### 3. Boot the gateway and read its EUI
 
-SSH in (password `linxdot`):
+The Gateway EUI is burned into the SX1302 concentrator chip and printed by Basics Station at startup. To see it, bootstrap the container with a placeholder key (you'll replace it with the real one in step 5):
 
 ```bash
-ssh root@<device-ip>
-docker logs basicstation 2>&1 | grep "Station EUI"
+ssh root@<device-ip>                                       # password: linxdot
+echo placeholder > /data/basicstation/tc_key.txt
+/etc/init.d/S80dockercompose start
+sleep 10
+docker logs basicstation 2>&1 | grep "Gateway EUI:"
+# → Gateway EUI:   0016C001F140B34D
 ```
 
-### 4. Register on TTN and get an API key
+### 4. Register on TTN and get an LNS key
 
 On [TTN Console](https://console.cloud.thethings.network):
 
-1. **Gateways → Register gateway**. Enter the Gateway EUI, pick your frequency plan (e.g. `Europe 863-870 MHz`), register.
-2. Open the gateway's **API keys → Add API key**. Tick **Link as Gateway to a Gateway Server...**, create. Copy the key starting with `NNSXS.` — you won't see it again.
+1. **Gateways → Register gateway**. Enter the Gateway EUI from step 3, pick your frequency plan (e.g. `Europe 863-870 MHz`), register.
+2. Open the gateway's **API keys → Add API key**. Tick **Link as Gateway to a Gateway Server for traffic exchange** under *Gateway connection (also LNS Key)*. Create, copy the `NNSXS.…` value — TTN shows it once.
 
-### 5. Configure and start
+### 5. Install the real key
 
 ```bash
-ssh root@<device-ip>
-echo 'NNSXS.your-key-here...' > /data/basicstation/tc_key.txt
+echo 'NNSXS.your-real-key-here...' > /data/basicstation/tc_key.txt
+chmod 600 /data/basicstation/tc_key.txt
 /etc/init.d/S80dockercompose restart
-/etc/init.d/S80dockercompose status       # expect TC_KEY configured, basicstation Up
+sleep 15
+docker logs basicstation 2>&1 | grep -i "Connected to MUXS"
+# → [TCE:VERB] Connected to MUXS.
 ```
 
-On TTN Console your gateway should show **Connected**.
+On TTN Console your gateway should show **Connected**. The key lives on `/data` and survives reboots and OTA updates — you only do this once per device.
 
 ### 6. Change region (optional)
 
-Default is `eu1`. To change:
+Default is `eu1` (Europe). To switch to another TTN cluster, drop a `/data` override of the compose file (this also makes your customization OTA-safe — runtime edits to `/etc/docker-compose.yml` stack on the overlayfs and can mask future firmware fixes):
 
 ```bash
-ssh root@<device-ip>
-vi /data/docker-compose.yml       # TTS_REGION: eu1 | nam1 | au1
+cp /etc/docker-compose.yml /data/docker-compose.yml   # /data override is bind-mounted at boot
+vi /data/docker-compose.yml                           # TTS_REGION: eu1 | nam1 | au1 | ...
 /etc/init.d/S80dockercompose restart
 ```
 
@@ -83,7 +91,7 @@ vi /data/docker-compose.yml       # TTS_REGION: eu1 | nam1 | au1
 
 ## Updates
 
-Devices running the A/B-layout firmware pick up new releases automatically — 60 s after boot, `ota-check` polls GitHub Releases, applies any newer version to the inactive slot, and reboots. If the new slot fails to reach TTN within the trial window, U-Boot rolls back to the old slot automatically. `/data` (your TTN key, Docker state, config) is preserved across updates.
+Devices running the A/B-layout firmware pick up new releases automatically — 60 s after boot, `ota-check` polls GitHub Releases, downloads any newer version, **verifies its RSA-4096 signature** against the public key embedded in the rootfs, applies it to the inactive slot, and reboots. Unsigned or tampered bundles are refused at install time. If the new slot fails its post-boot health check (Docker up, basicstation responding), U-Boot's bootcount mechanism flips back to the previous slot automatically — no manual recovery, no truck roll. `/data` (your TTN key, Docker images, config) is preserved across both updates and rollbacks.
 
 Trigger a check manually without rebooting:
 
@@ -104,6 +112,7 @@ ssh root@<device-ip> ota-check
 | `TC_KEY: NOT CONFIGURED` | Step 5 not done — add the API key to `tc_key.txt` and restart compose. |
 | `EUI Source: eth0` instead of `chip` | Concentrator not reset. Power-cycle the device, or run `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start`. |
 | Gateway not showing on TTN | Verify EUI matches registration; `docker logs basicstation` for connection errors. |
+| Repeated `excessive clock drifts (... ppm, threshold 100ppm)` | SX1302 reference oscillator drift. Cosmetic for the LNS link, but degrades RX timing on class-B/C — log a hardware issue if persistent. |
 
 See `Docs/linxdot_fsd.md § 9 Troubleshooting` for the full list including rollback diagnosis.
 
