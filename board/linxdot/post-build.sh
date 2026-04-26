@@ -21,11 +21,6 @@ echo ">>> Copying prebuilt kernel Image and DTB"
 cp "${BOARD_DIR}/blobs/Image" "${BINARIES_DIR}/"
 cp "${BOARD_DIR}/blobs/rk3566-linxdot.dtb" "${BINARIES_DIR}/"
 
-# ── Copy boot blobs for genimage ──
-echo ">>> Copying boot blobs (idbloader, u-boot.itb)"
-cp "${BOARD_DIR}/blobs/idbloader.img" "${BINARIES_DIR}/"
-cp "${BOARD_DIR}/blobs/u-boot.itb" "${BINARIES_DIR}/"
-
 # ── Install kernel modules ──
 echo ">>> Installing kernel modules to rootfs"
 MODULES_SRC="${BOARD_DIR}/modules/5.15.104"
@@ -65,5 +60,17 @@ mkdir -p "${TARGET_DIR}/data"
 mkdir -p "${TARGET_DIR}/var/log"
 mkdir -p "${TARGET_DIR}/var/lib"
 mkdir -p "${TARGET_DIR}/var/run"
+
+# ── Write /etc/os-release (VERSION_ID consumed by ota-check) ──
+OS_VERSION="${OS_VERSION:-dev}"
+echo ">>> Setting os-release VERSION_ID=${OS_VERSION}"
+cat > "${TARGET_DIR}/etc/os-release" <<EOF
+NAME="OpenLinxdot"
+ID=openlinxdot
+PRETTY_NAME="OpenLinxdot ${OS_VERSION}"
+VERSION="${OS_VERSION}"
+VERSION_ID=${OS_VERSION}
+HOME_URL="https://github.com/SensorsIot/Linxdot-Hotspot"
+EOF
 
 echo ">>> OpenLinxdot post-build complete"

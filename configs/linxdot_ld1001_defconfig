@@ -5,14 +5,50 @@ BR2_aarch64=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 
-# Kernel — not built (Phase 1 uses prebuilt)
+# Kernel — not built (Phase 1/3 uses prebuilt 5.15.104)
 # BR2_LINUX_KERNEL is not set
 
-# U-Boot — not built (Phase 1 uses extracted bootloader)
-# BR2_TARGET_UBOOT is not set
+# U-Boot — built from source (Phase 3)
+BR2_TARGET_UBOOT=y
+BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
+BR2_TARGET_UBOOT_BOARD_DEFCONFIG="quartz64-a-rk3566"
+BR2_TARGET_UBOOT_CUSTOM_VERSION=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION_VALUE="2024.04"
+BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LINXDOT_PATH)/board/linxdot/uboot/linxdot.fragment"
+BR2_TARGET_UBOOT_NEEDS_DTC=y
+BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
+BR2_TARGET_UBOOT_NEEDS_PYELFTOOLS=y
+BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
+BR2_TARGET_UBOOT_NEEDS_GNUTLS=y
+BR2_TARGET_UBOOT_NEEDS_ATF_BL31=y
+BR2_TARGET_UBOOT_NEEDS_ATF_BL31_ELF=y
+BR2_TARGET_UBOOT_NEEDS_ROCKCHIP_RKBIN=y
+# Modern Rockchip U-Boot emits a unified u-boot-rockchip.bin (SPL + FIT w/ BL31 + u-boot).
+# Do not select FORMAT_ITB / SPL_NAME — the unified blob is installed via
+# the NEEDS_ROCKCHIP_RKBIN post-install hook and written at offset 32K.
 
-# TF-A — not built (Phase 1 uses extracted bootloader)
-# BR2_TARGET_ARM_TRUSTED_FIRMWARE is not set
+# TF-A — source build is force-selected by BR2_TARGET_UBOOT_NEEDS_ATF_BL31 above.
+# Kept enabled for that reason, but the BL31 it produces is OVERRIDDEN at the
+# U-Boot make step by ROCKCHIP_RKBIN_BL31_FILENAME (see below). TF-A v2.12.0
+# lacks the Rockchip-vendor SIP SMCs that the vendor 5.15 kernel calls into —
+# swapping in rkbin's rk3568_bl31_v1.45.elf unblocks Linux boot. Revisit when
+# Phase 2 (mainline kernel from source) lands and we no longer need those SMCs.
+BR2_TARGET_ARM_TRUSTED_FIRMWARE=y
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION=y
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION_VALUE="v2.12.0"
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM="rk3568"
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_BL31=y
+# Rockchip TF-A emits bl31.elf (not *.bin); U-Boot consumes ELF directly.
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_IMAGES="bl31/bl31.elf"
+
+# Rockchip proprietary firmware blobs (see FSD §3.3, §10.1):
+#   - DDR init TPL (required for RK356x DRAM bring-up)
+#   - Vendor BL31 (overrides TF-A's — same rkbin version rkbin's own
+#     RKTRUST/RK3568TRUST.ini references, canonical for this SoC)
+# U-Boot's make opts append this BL31= after TF-A's, so rkbin wins.
+BR2_PACKAGE_ROCKCHIP_RKBIN=y
+BR2_PACKAGE_ROCKCHIP_RKBIN_TPL_FILENAME="bin/rk35/rk3568_ddr_1560MHz_v1.18.bin"
+BR2_PACKAGE_ROCKCHIP_RKBIN_BL31_FILENAME="bin/rk35/rk3568_bl31_v1.43.elf"
 
 # Init system
 BR2_INIT_BUSYBOX=y
@@ -59,6 +95,15 @@ BR2_PACKAGE_UTIL_LINUX=y
 BR2_PACKAGE_UTIL_LINUX_MOUNT=y
 BR2_PACKAGE_UTIL_LINUX_FINDMNT=y
 BR2_PACKAGE_NANO=y
+
+# Packages — OTA
+BR2_PACKAGE_LIBUBOOTENV=y
+BR2_PACKAGE_LIBCONFIG=y
+BR2_PACKAGE_OPENSSL=y
+BR2_PACKAGE_SWUPDATE=y
+BR2_PACKAGE_SWUPDATE_CONFIG="$(BR2_EXTERNAL_LINXDOT_PATH)/board/linxdot/swupdate/swupdate.config"
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_CURL=y
 
 # Packages — system
 BR2_PACKAGE_CGROUPFS_MOUNT=y

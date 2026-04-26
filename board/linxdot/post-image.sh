@@ -11,22 +11,33 @@ set -e
 BINARIES_DIR="$1"
 BR2_EXT="$2"
 BOARD_DIR="${BR2_EXT}/board/linxdot"
+HOST_DIR="$(dirname "$BINARIES_DIR")/host"
+
+# Prefer Buildroot host tools, fall back to system (used by the CI release job
+# which assembles images from a pre-built rootfs without a Buildroot tree).
+MKIMAGE="${HOST_DIR}/bin/mkimage"
+[ -x "$MKIMAGE" ] || MKIMAGE=mkimage
+MKENVIMAGE="${HOST_DIR}/bin/mkenvimage"
+[ -x "$MKENVIMAGE" ] || MKENVIMAGE=mkenvimage
 
 echo ">>> OpenLinxdot post-image: BINARIES_DIR=${BINARIES_DIR}"
 
-# ── Create extlinux.conf for U-Boot ──
-# NOTE: extlinux is more reliable than boot.scr on vendor U-Boot 2017.09
-echo ">>> Creating extlinux.conf"
-mkdir -p "${BINARIES_DIR}/extlinux"
-cat > "${BINARIES_DIR}/extlinux/extlinux.conf" << 'EOF'
-default linxdot
-timeout 3
+# ── Compile boot.cmd → boot.scr ──
+echo ">>> Compiling boot.cmd to boot.scr"
+"$MKIMAGE" -A arm64 -T script -C none -n "OpenLinxdot boot" \
+    -d "${BOARD_DIR}/boot.cmd" "${BINARIES_DIR}/boot.scr"
 
-label linxdot
-    kernel /Image
-    fdt /rk3566-linxdot.dtb
-    append root=/dev/mmcblk1p2 rootfstype=ext4 rootwait ro console=ttyS2,1500000 panic=10
-EOF
+# ── Generate U-Boot env image (64K primary + 64K redundant) ──
+# -r adds the 1-byte "active" flag after the CRC32 — required when U-Boot is
+# built with CONFIG_SYS_REDUNDAND_ENVIRONMENT, otherwise U-Boot reads the old
+# non-redundant layout, can't parse it, and falls back to default env (so
+# altbootcmd, bootcount, boot_slot etc. are missing on first boot).
+echo ">>> Generating uboot-env.bin"
+"$MKENVIMAGE" -r -s 0x10000 -o "${BINARIES_DIR}/uboot-env-primary.bin" \
+    "${BOARD_DIR}/uboot/env.txt"
+cat "${BINARIES_DIR}/uboot-env-primary.bin" "${BINARIES_DIR}/uboot-env-primary.bin" \
+    > "${BINARIES_DIR}/uboot-env.bin"
+rm -f "${BINARIES_DIR}/uboot-env-primary.bin"
 
 # ── Run genimage to produce the final eMMC image ──
 echo ">>> Running genimage"
@@ -41,27 +52,6 @@ genimage \
     --inputpath "${BINARIES_DIR}" \
     --outputpath "${BINARIES_DIR}" \
     --config "${GENIMAGE_CFG}"
-
-# ── Add extlinux directory to boot partition in final image ──
-# genimage doesn't create subdirectories in vfat properly, so we patch after
-echo ">>> Adding extlinux directory to boot partition"
-BOOT_OFFSET=$((16 * 1024 * 1024))  # 16MB offset
-BOOT_SIZE=$((30 * 1024 * 1024))    # 30MB size
-
-# Extract boot.vfat from final image
-dd if="${BINARIES_DIR}/linxdot-basics-station.img" of="${BINARIES_DIR}/boot.vfat.tmp" \
-    bs=1M skip=16 count=30 status=none
-
-# Create extlinux directory and copy config
-MTOOLS_SKIP_CHECK=1 mmd -i "${BINARIES_DIR}/boot.vfat.tmp" ::extlinux 2>/dev/null || true
-MTOOLS_SKIP_CHECK=1 mcopy -i "${BINARIES_DIR}/boot.vfat.tmp" \
-    "${BINARIES_DIR}/extlinux/extlinux.conf" ::extlinux/
-
-# Write modified boot.vfat back to final image
-dd if="${BINARIES_DIR}/boot.vfat.tmp" of="${BINARIES_DIR}/linxdot-basics-station.img" \
-    bs=1M seek=16 conv=notrunc status=none
-
-rm -f "${BINARIES_DIR}/boot.vfat.tmp"
 
 echo ">>> OpenLinxdot image: ${BINARIES_DIR}/linxdot-basics-station.img"
 echo ">>> OpenLinxdot post-image complete"

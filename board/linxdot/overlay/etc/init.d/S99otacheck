@@ -1,0 +1,15 @@
+#!/bin/sh
+# S99otacheck — kick off an OTA check in the background after boot settles.
+# Non-blocking so Basics Station starts promptly.
+
+case "$1" in
+    start) ;;
+    stop|*) exit 0 ;;
+esac
+
+(
+    sleep 60
+    /usr/sbin/ota-check 2>&1 | logger -t ota-boot
+) &
+
+exit 0
