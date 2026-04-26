@@ -758,7 +758,7 @@ The Phase 4 hardware bring-up peeled four nested SWUpdate-config bugs and two us
 
 - [x] Hardware validation runbook — `Docs/phase3_hardware_validation.md`.
 - [ ] Prune Phase 1 vendor blobs from `board/linxdot/blobs/` (`idbloader.img`, `u-boot.itb`) once Phase 3 is hardware-validated and the branch merges — currently kept as a rollback fallback for the pre-A/B migration path (C-5, §8.4).
-- [ ] Migrate CLAUDE.md to describe the merged (Phase 3+) baseline once `OTA` → `main`.
+- [x] Migrate CLAUDE.md to describe the merged (Phase 3+) baseline once `OTA` → `main`. Done 2026-04-26 alongside the v1.0.0 release (rewrote tech stack, project structure, key conventions, and gotchas; pointers to FSD § 9 Developer Guide for OTA-compat changes).
 
 
 ## 13. Appendix
