@@ -1,6 +1,84 @@
 # OpenLinxdot — Functional Specification Document (FSD)
 
-## 1. System Overview
+## 1. Introduction
+
+### 1.1 Purpose
+
+This document is the canonical functional specification for **OpenLinxdot**, custom Buildroot firmware that turns the Linxdot LD1001 LoRaWAN gateway into a clean-room, OTA-updatable TTN gateway. It specifies what the system must do, the constraints under which it operates, the interfaces it exposes, the procedures for building / releasing / recovering it, and the verification evidence that confirms each requirement has been met. § 9 (Developer Guide) extends the spec with concrete guidance for contributors making changes intended to ship via OTA.
+
+`README.md` is the operator-facing companion to this document; `CLAUDE.md` is the AI-agent onboarding companion. Where the three disagree, **this FSD is canonical**.
+
+### 1.2 Scope
+
+In scope:
+- All firmware shipped to deployed Linxdot LD1001 hardware: bootloader, kernel, rootfs, services.
+- The Buildroot tree (this repository), CI pipeline, OTA delivery infrastructure (GitHub Releases + signing).
+- Operational procedures for build, release, factory flashing, OTA, recovery.
+
+Out of scope:
+- TTN-side account or network configuration (operator's responsibility).
+- WiFi support (firmware extraction is operator-side; not redistributable).
+- Cellular / non-Ethernet transports.
+
+### 1.3 Audience
+
+| Reader | Sections of primary interest |
+|---|---|
+| **Maintainers** building & releasing firmware | § 8 (Operations), § 12 (Backlog), § 13 (Appendix) |
+| **Contributors** changing the firmware | § 5 (Requirements), § 9 (Developer Guide), § 10 (V&V) |
+| **Field operators** deploying & supporting devices | `README.md` (primary), § 8.8 / § 11 (Recovery, Troubleshooting) |
+| **Security reviewers** auditing the OTA chain | § 5.2 (NFR-2.x), § 7 (Interfaces), § 8.5 (Signing key lifecycle), § 10.3 (TC-4.3) |
+
+### 1.4 Definitions, Acronyms & Conventions
+
+**Glossary:**
+
+| Term | Meaning |
+|---|---|
+| **A/B slot** | Two redundant rootfs+boot partitions (`p1`+`p2` = slot A, `p3`+`p4` = slot B). The active slot is selected by U-Boot env `boot_slot`; the inactive slot receives OTA writes. |
+| **Basics Station** | Semtech reference LoRa packet-forwarder. Connects gateway to the LNS over WebSocket+TLS. |
+| **BL31** | EL3 secure-monitor firmware. In OpenLinxdot Phase 3+ this is the rkbin vendor binary `rk3568_bl31_v1.43.elf` (see § 4.3, § 13.1). |
+| **CUPS** | Configuration & Update Server — Basics Station's optional config endpoint. **Not used** by OpenLinxdot. |
+| **DTB / DTS** | Device Tree (Blob / Source). Vendor `rk3566-linxdot.dtb` is used through Phase 4; replaced by an in-tree DTS in Phase 5. |
+| **EUI** | Extended Unique Identifier — the 64-bit identity for the gateway, read from the SX1302 chip ID. |
+| **FIT image** | U-Boot's Flattened Image Tree — packages BL31 + U-Boot proper into one verifiable container. |
+| **LNS** | LoRaWAN Network Server. For OpenLinxdot the LNS is TTN at `wss://<region>.cloud.thethings.network`. |
+| **LFS** | Git Large File Storage. Vendor blobs (`Image`, `*.dtb`, modules) are LFS-tracked. |
+| **OTA** | Over-the-Air update. In OpenLinxdot: Ethernet-only, polling GitHub Releases. |
+| **rkbin** | Rockchip's binary blob repository — DDR TPL and BL31 sources. |
+| **SoC** | System-on-Chip. Linxdot LD1001 uses the Rockchip RK3566. |
+| **SPL** | Secondary Program Loader — first stage of U-Boot, runs from on-chip SRAM. |
+| **SWUpdate** | OTA install agent (sbabic/swupdate). Consumes signed `.swu` bundles. |
+| **`.swu`** | SWUpdate's bundle format — a CPIO archive containing `sw-description` + payloads + signatures. |
+| **TC key** | Thing Configuration key — TTN-issued LNS API key, stored in `/data/basicstation/tc_key.txt`. |
+| **TF-A** | Trusted Firmware-A. Source-built (v2.12.0) but its BL31 output is unused; rkbin BL31 is linked instead (§ 4.3, § 13.1). |
+| **TPL** | Tertiary Program Loader — Rockchip terminology for the DDR-init blob the SPL pulls in. |
+| **trial boot** | The first boot after a slot upgrade, marked by `upgrade_available=1`. Must be confirmed within `bootlimit` boots or U-Boot rolls back. |
+| **upper / lower / overlay** | overlayfs concepts. The rootfs is the *lower*; `/data/overlay/<dir>/upper` collects writes. |
+
+**Conventions** (RFC 2119):
+- **Must** — mandatory; non-negotiable for compliance.
+- **Should** — recommended; deviations require justification.
+- **May** — optional.
+- Code/file references use backticks: `board/linxdot/overlay/etc/init.d/S99otacheck`.
+- Filesystem paths starting with `/` refer to the on-device filesystem; paths without are repo-relative.
+- Section cross-references use the `§ N.X` form. References preceded by "runbook" point to `Docs/phase3_hardware_validation.md`, not this document.
+
+### 1.5 References
+
+| Source | Description |
+|---|---|
+| `README.md` | Operator-facing quick start: flashing, TTN setup, troubleshooting. |
+| `Docs/Hardware.md` | Board reference: GPIO, peripherals, BootROM status. |
+| `Docs/phase3_hardware_validation.md` | Hardware bring-up runbook for Phase 3 (TC-3.x procedures). |
+| `CLAUDE.md` | AI-agent onboarding (Phase 1 baseline + gotchas). |
+| Buildroot manual | https://buildroot.org/downloads/manual/manual.html (2024.02 LTS). |
+| SWUpdate documentation | https://sbabic.github.io/swupdate/. |
+| Basics Station documentation | https://doc.sm.tc/station/. |
+| TTN gateway docs | https://www.thethingsindustries.com/docs/gateways/. |
+| RFC 2119 | Keywords for use in RFCs to indicate requirement levels. |
+
+## 2. System Overview
 
 OpenLinxdot is a custom Buildroot-based firmware that turns a **Linxdot LD1001** (Rockchip RK3566, ARMv8) into a LoRaWAN gateway for **The Things Network (TTN)** via the Semtech Basics Station protocol. It replaces the vendor CrankkOS userspace with a minimal, inspectable, auditable stack: a read-only Buildroot rootfs, a single Docker container running Basics Station, and — from Phase 3 onward — a source-built bootloader that enables Ethernet-only OTA updates with bootloader-level auto-rollback.
 
@@ -27,9 +105,9 @@ BootROM → idbloader (SPL + DDR init) → TF-A BL31 → U-Boot → boot.scr
   → dockerd → docker-compose → basicstation → WebSocket TLS → TTN LNS
 ```
 
-## 2. System Architecture
+## 3. System Architecture
 
-### 2.1 Logical Architecture
+### 3.1 Logical Architecture
 
 | Subsystem | Role |
 |---|---|
@@ -43,7 +121,7 @@ BootROM → idbloader (SPL + DDR init) → TF-A BL31 → U-Boot → boot.scr
 | **SWUpdate** (Phase 4) | Writes inactive A/B slot, sets U-Boot env flags for trial boot. |
 | **Confirm gate** (Phase 4) | `S98confirm` waits for Basics Station to reach TTN, then clears trial flags; U-Boot otherwise rolls back. |
 
-### 2.2 Hardware / Platform Architecture
+### 3.2 Hardware / Platform Architecture
 
 Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Summary:
 
@@ -56,7 +134,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **USB:** USB-C behind the case, wired to the RK3566 USB2.0 controller — enables Rockchip download mode for `rkdeveloptool` flashing. Accessible from serial via `rockusb` / `download` commands without any physical button.
 - **BootROM:** confirmed **non-secure** (see `Docs/Hardware.md § BootROM secure-mode status`).
 
-### 2.3 Software Architecture
+### 3.3 Software Architecture
 
 **Build system:** Buildroot 2024.02 LTS with `BR2_EXTERNAL` tree (this repository). Custom defconfig `configs/linxdot_ld1001_defconfig`, rootfs overlay under `board/linxdot/overlay/`, partition layout in `board/linxdot/genimage.cfg`.
 
@@ -92,9 +170,9 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 7. If `upgrade_available=1`, `S98confirm` waits for Basics Station to reach TTN, then clears flags.
 8. If boot attempts exceed `bootlimit` without clearing flags, U-Boot runs `altbootcmd` → slot flips, device boots old slot.
 
-## 3. Implementation Phases
+## 4. Implementation Phases
 
-### 3.1 Phase 1 — Infrastructure Foundation (complete)
+### 4.1 Phase 1 — Infrastructure Foundation (complete)
 
 **Scope:** Replace CrankkOS userspace with a clean Buildroot rootfs while keeping the vendor bootloader, kernel, and DTB as binary blobs. Produce a flashable single-slot image.
 
@@ -106,7 +184,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 **Exit criteria:** Device flashes via `rkdeveloptool`, boots, obtains DHCP lease, connects to TTN once `TC_KEY` is configured, survives power cycles.
 
-### 3.2 Phase 2 — Kernel from source (planned)
+### 4.2 Phase 2 — Kernel from source (planned)
 
 **Scope:** Replace the vendor Linux 5.15.104 binary with an in-tree-built mainline kernel (6.1 LTS or later) with RK3566 support.
 
@@ -114,11 +192,11 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 **Exit criteria:** Device boots self-built kernel, all peripherals function at parity with Phase 1, Basics Station reaches TTN.
 
-### 3.3 Phase 3 — Bootloader from source (in progress, branch `OTA`)
+### 4.3 Phase 3 — Bootloader from source (in progress, branch `OTA`)
 
 **Scope:** Replace vendor U-Boot 2017.09 (which lacks writable env and has a `boot.scr` execution bug) with mainline U-Boot 2024.04+ on `quartz64-a-rk3566_defconfig` base, plus an EL3 monitor (BL31) compatible with the vendor 5.15 kernel.
 
-> **BL31 sourcing note (2026-04-23).** We originally scoped TF-A BL31 from source (v2.12.0, PLAT=rk3568). Hardware validation on the Workbench LD1001 proved that the vendor 5.15 kernel hangs silently after `Starting kernel ...` on that BL31 — consistent with the kernel calling Rockchip-vendor SIP SMCs that upstream TF-A v2.12.0 does not implement. Phase 3 therefore uses rkbin's prebuilt `rk3568_bl31_v1.43.elf` (the canonical version referenced by rkbin's own `RKTRUST/RK3568TRUST.ini`). The TF-A source build is kept enabled because `BR2_TARGET_UBOOT_NEEDS_ATF_BL31` force-selects it, but its output is unused — U-Boot's make opts link rkbin's BL31 instead. This will be revisited when Phase 2 (mainline kernel) lands and vendor SMCs are no longer required. See Constants (§10.1).
+> **BL31 sourcing note (2026-04-23).** We originally scoped TF-A BL31 from source (v2.12.0, PLAT=rk3568). Hardware validation on the Workbench LD1001 proved that the vendor 5.15 kernel hangs silently after `Starting kernel ...` on that BL31 — consistent with the kernel calling Rockchip-vendor SIP SMCs that upstream TF-A v2.12.0 does not implement. Phase 3 therefore uses rkbin's prebuilt `rk3568_bl31_v1.43.elf` (the canonical version referenced by rkbin's own `RKTRUST/RK3568TRUST.ini`). The TF-A source build is kept enabled because `BR2_TARGET_UBOOT_NEEDS_ATF_BL31` force-selects it, but its output is unused — U-Boot's make opts link rkbin's BL31 instead. This will be revisited when Phase 2 (mainline kernel) lands and vendor SMCs are no longer required. See Constants (§13.1).
 
 **Deliverables:**
 - `BR2_TARGET_UBOOT` + `BR2_TARGET_ARM_TRUSTED_FIRMWARE` + `BR2_PACKAGE_ROCKCHIP_RKBIN` enabled in defconfig.
@@ -129,7 +207,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 **Exit criteria:** Device boots from built U-Boot; deliberately-broken slot triggers `altbootcmd` rollback automatically; `fw_setenv` / `fw_printenv` work from userspace.
 
-### 3.4 Phase 4 — OTA update layer (in progress, branch `OTA`)
+### 4.4 Phase 4 — OTA update layer (in progress, branch `OTA`)
 
 **Scope:** Layer SWUpdate + signed `.swu` bundles + boot-time polling of GitHub Releases on top of Phase 3.
 
@@ -143,15 +221,15 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 **Exit criteria:** Tagged release on GitHub is picked up by a deployed device within one boot cycle; healthy update commits, broken update rolls back without human intervention.
 
-### 3.5 Phase 5 — Curated in-tree DTS (planned)
+### 4.5 Phase 5 — Curated in-tree DTS (planned)
 
 **Scope:** Replace vendor `rk3566-linxdot.dtb` with an in-tree DTS the community can audit and modify. Enables full bootarg control and removes the last vendor binary.
 
 **Exit criteria:** All peripherals functional from in-tree DTS, no vendor DTB required.
 
-## 4. Functional Requirements
+## 5. Functional Requirements
 
-### 4.1 Functional Requirements (FR)
+### 5.1 Functional Requirements (FR)
 
 #### Gateway function
 - **FR-1.1** [Must]: The system shall run exactly one Basics Station container configured for SX1302 on SPI at `/dev/spidev0.0`.
@@ -192,7 +270,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **FR-6.1** [Should]: The system shall expose Docker logs via `docker logs basicstation` for operator diagnosis of TTN connectivity.
 - **FR-6.2** [Should]: `/etc/init.d/S80dockercompose status` shall report TC key configuration, reset script status, and container state.
 
-### 4.2 Non-Functional Requirements (NFR)
+### 5.2 Non-Functional Requirements (NFR)
 
 - **NFR-1.1** [Must]: A successful OTA update (download, apply, commit) shall complete in under 5 minutes on a typical home broadband connection.
 - **NFR-1.2** [Must]: A failed trial boot shall roll back to the prior slot without any operator action.
@@ -204,7 +282,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **NFR-4.1** [Should]: The build system shall be fully reproducible from the `BR2_EXTERNAL` tree plus a pinned Buildroot LTS version.
 - **NFR-4.2** [Should]: Reproducibility: Phase 3+ builds all security-critical components (U-Boot, TF-A, BL31) from source with pinned versions. The Rockchip DDR TPL blob is the only proprietary component and cannot be replaced on RK356x.
 
-### 4.3 Constraints
+### 5.3 Constraints
 
 - **C-1** The RK3566 BootROM expects the SPL (idbloader) at eMMC sector 64 (32 KiB) and the FIT image (U-Boot + BL31) at sector 16384 (8 MiB). These offsets are fixed by silicon. Phase 3+ writes a single unified `u-boot-rockchip.bin` at offset 32 KiB whose internal layout places both sub-parts at the required absolute offsets.
 - **C-2** The vendor DTB (`rk3566-linxdot.dtb`) declares `stdout-path = "serial2:1500000n8"`; while this DTB is used, console must remain at 1.5 Mbaud. Phase 5 (in-tree DTS) lifts this constraint.
@@ -213,17 +291,17 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **C-5** Devices flashed with the pre-A/B (Phase 1) image cannot receive OTA updates. A one-time `rkdeveloptool` reflash with the A/B image is required to migrate. `/data` is recreated on reflash; `tc_key.txt` must be backed up beforehand.
 - **C-6** WiFi firmware (`firmware/brcm/`) is not distributable under the Broadcom licence and must be extracted from a CrankkOS image locally before building a WiFi-capable variant.
 
-## 5. Risks, Assumptions & Dependencies
+## 6. Risks, Assumptions & Dependencies
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | Mainline U-Boot lacks a Linxdot-specific peripheral quirk | Medium | High | Start from `quartz64-a-rk3566_defconfig`, iterate; keep vendor U-Boot blob as fallback until Phase 3 validated on hardware. |
-| OTA bundle signature mismatch bricks all deployed devices after key rotation | Low | High | Ship new public key in firmware image *before* rotating the private key; rotation procedure documented in § 7.5. |
+| OTA bundle signature mismatch bricks all deployed devices after key rotation | Low | High | Ship new public key in firmware image *before* rotating the private key; rotation procedure documented in § 8.5. |
 | Partial `.swu` download corrupts slot | Low | Low | SWUpdate verifies sha256 of each image before committing; `upgrade_available` is not set on failed download. |
 | `S98confirm` health gate false-negative (Basics Station slow to connect) | Medium | Medium | 120 s wait; can be tuned in the init script. Worst-case outcome is a rollback to the prior known-good slot, which is recoverable. |
-| Private signing key leaks | Low | High | Key stored only in GitHub Actions secret (`OTA_SIGNING_KEY`). Rotation procedure in § 7.5. Devices only trust the baked-in public key. |
-| `host-tools.tar.gz` bundles runner libc via unfiltered `ldd` (base-build job) and the release job `sudo cp`s it into `/usr/local/lib/` + runs `ldconfig` | High (already observed 2026-04-23) | High | genimage's only non-system dep is `libconfuse2`; filter `ldd` to non-system libs **or** drop the bundle and `apt-get install libconfuse2` on the release runner. Never replay the release install step inside the devcontainer — Debian trixie's `/bin/sh` will SIGFPE against an Ubuntu 22.04 libc (`GLIBC_2.38 not found`). See § 7.2. |
-| EL3 is now a Rockchip vendor binary (`rk3568_bl31_v1.43.elf` from rkbin) instead of TF-A v2.12.0 built from source | Medium | Medium | Accepted for Phase 3 to unblock vendor 5.15 kernel (see §3.3). Pin the exact rkbin file path in defconfig + Buildroot snapshot. No CVE response channel; mitigation is to revisit once Phase 2 (mainline kernel) removes the dependency on Rockchip-vendor SIP SMCs and source TF-A can be re-adopted. |
+| Private signing key leaks | Low | High | Key stored only in GitHub Actions secret (`OTA_SIGNING_KEY`). Rotation procedure in § 8.5. Devices only trust the baked-in public key. |
+| `host-tools.tar.gz` bundles runner libc via unfiltered `ldd` (base-build job) and the release job `sudo cp`s it into `/usr/local/lib/` + runs `ldconfig` | High (already observed 2026-04-23) | High | genimage's only non-system dep is `libconfuse2`; filter `ldd` to non-system libs **or** drop the bundle and `apt-get install libconfuse2` on the release runner. Never replay the release install step inside the devcontainer — Debian trixie's `/bin/sh` will SIGFPE against an Ubuntu 22.04 libc (`GLIBC_2.38 not found`). See § 8.2. |
+| EL3 is now a Rockchip vendor binary (`rk3568_bl31_v1.43.elf` from rkbin) instead of TF-A v2.12.0 built from source | Medium | Medium | Accepted for Phase 3 to unblock vendor 5.15 kernel (see §4.3). Pin the exact rkbin file path in defconfig + Buildroot snapshot. No CVE response channel; mitigation is to revisit once Phase 2 (mainline kernel) removes the dependency on Rockchip-vendor SIP SMCs and source TF-A can be re-adopted. |
 
 **Assumptions:**
 - The LD1001 BootROM is shipped **non-secure** (evidence: vendor SPL prints `## Verified-boot: 0`, accepts unsigned custom `-dirty` build). This has been spot-checked on one unit; operators should confirm on their own hardware before first flash.
@@ -239,9 +317,9 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - Docker image `xoseperez/basicstation` (upstream).
 - TTN (The Things Network) as the LNS.
 
-## 6. Interface Specifications
+## 7. Interface Specifications
 
-### 6.1 External Interfaces
+### 7.1 External Interfaces
 
 | Interface | Direction | Protocol | Endpoint |
 |---|---|---|---|
@@ -252,7 +330,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 | Serial console | Bidirectional | UART (8N1, 1.5 Mbaud) | ttyS2 @ 3.5 mm TRRS jack, also `rfc2217://192.168.0.87:4003` via Workbench |
 | Device provisioning (flashing) | Inbound | Rockchip USB (rkusb) | USB-C on device, Loader or Maskrom mode |
 
-### 6.2 Internal Interfaces
+### 7.2 Internal Interfaces
 
 - **U-Boot ↔ Linux**: `/etc/fw_env.config` tells `libubootenv` where the env partition lives (`/dev/mmcblk0` @ `0xE00000`, 64 KiB, redundant at `0xE10000`). Must match `CONFIG_ENV_OFFSET` / `CONFIG_ENV_SIZE` / `CONFIG_ENV_OFFSET_REDUND` in `board/linxdot/uboot/linxdot.fragment`.
 - **OTA agent ↔ SWUpdate**: `ota-check` invokes `swupdate -i update.swu -e stable,linxdot-ld1001,target-<B|A>`.
@@ -260,7 +338,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **Basics Station ↔ SX1302**: SPI on `/dev/spidev0.0` (via Docker device passthrough).
 - **Docker ↔ persistent storage**: `/data/docker` (data-root), not `/var/lib/docker`.
 
-### 6.3 Data Models / Schemas
+### 7.3 Data Models / Schemas
 
 **`manifest.json`** (published with each Release):
 ```json
@@ -287,9 +365,9 @@ VERSION_ID=<VERSION>
 ```
 `VERSION` is set to `${GITHUB_REF_NAME#v}` by CI (e.g. `1.2.3` for tag `v1.2.3`), or `dev` for local builds.
 
-## 7. Operational Procedures
+## 8. Operational Procedures
 
-### 7.1 Build
+### 8.1 Build
 
 ```
 cd buildroot   # Buildroot 2024.02.8 extracted here
@@ -300,7 +378,7 @@ make -j$(nproc)
 
 First build takes ~1 hour (downloads toolchain, all source tarballs). Subsequent builds use ccache and `buildroot/dl/` cache.
 
-### 7.2 Release (maintainer)
+### 8.2 Release (maintainer)
 
 1. `git tag v1.2.3 && git push --tags`.
 2. CI pipeline (see `.github/workflows/build.yml`):
@@ -309,9 +387,9 @@ First build takes ~1 hour (downloads toolchain, all source tarballs). Subsequent
    - `base-build` (only if changed, ~1 h): full Buildroot rebuild → uploads `rootfs.tar.xz` + `host-tools.tar.gz` to `base-latest` prerelease.
    - `release` (~3 min): download cached base, apply overlay, run `post-build.sh` + `post-image.sh`, validate image, build signed `.swu` if `OTA_SIGNING_KEY` secret is set, emit `manifest.json`, upload `.img.xz` + `.swu` + `manifest.json` to the tagged release.
 
-> **Do NOT replay the `release` job's "Install host tools" step locally (especially inside the devcontainer).** `host-tools.tar.gz` is currently built with an unfiltered `ldd` loop (`.github/workflows/build.yml` Bundle host tools step) that includes `libc.so.6` and `ld-linux-x86-64.so.2` from the Ubuntu 22.04 runner. The release job then `sudo cp`s them into `/usr/local/lib/` and runs `ldconfig`, which fatally downgrades the libc seen by `/bin/sh` on any newer distro (symptom: `Floating point exception` + `GLIBC_2.38 not found`, container fails to start). `genimage`'s only non-apt dependency is `libconfuse2` — install that instead. This CI behaviour is tracked in the risk table (§5).
+> **Do NOT replay the `release` job's "Install host tools" step locally (especially inside the devcontainer).** `host-tools.tar.gz` is currently built with an unfiltered `ldd` loop (`.github/workflows/build.yml` Bundle host tools step) that includes `libc.so.6` and `ld-linux-x86-64.so.2` from the Ubuntu 22.04 runner. The release job then `sudo cp`s them into `/usr/local/lib/` and runs `ldconfig`, which fatally downgrades the libc seen by `/bin/sh` on any newer distro (symptom: `Floating point exception` + `GLIBC_2.38 not found`, container fails to start). `genimage`'s only non-apt dependency is `libconfuse2` — install that instead. This CI behaviour is tracked in the risk table (§6).
 
-### 7.3 First-time flashing
+### 8.3 First-time flashing
 
 Option A — normal (requires one-time case-open):
 1. Download `linxdot-basics-station.img.xz` from GitHub Releases.
@@ -327,16 +405,16 @@ Option B — remote (if a USB cable is routed to a host running `rkdeveloptool`,
 
 This avoids repeat case-opens for Phase 3 → Phase 4 upgrade flashing.
 
-### 7.4 Migration from pre-A/B (Phase 1 → Phase 3+)
+### 8.4 Migration from pre-A/B (Phase 1 → Phase 3+)
 
 Single-slot Phase 1 devices **cannot** receive OTA. One-time reflash required:
 
 1. `ssh root@<device>` and back up `/data/basicstation/tc_key.txt` (and any custom `/data/docker-compose.yml`).
-2. Follow § 7.3 with the first A/B-layout release image.
+2. Follow § 8.3 with the first A/B-layout release image.
 3. Re-populate `/data/basicstation/tc_key.txt` with the saved key.
 4. All subsequent updates arrive via OTA — no further case-opens.
 
-### 7.5 OTA signing key lifecycle
+### 8.5 OTA signing key lifecycle
 
 **Initial setup (one time, by maintainer):**
 ```
@@ -353,7 +431,7 @@ shred -u ota-signing.key
 
 **Key compromise:** devices only trust the key baked into their rootfs. A leaked private key cannot be used to attack already-deployed devices unless they are also reflashed.
 
-### 7.6 Manual OTA trigger
+### 8.6 Manual OTA trigger
 
 ```
 ssh root@<device> ota-check
@@ -361,7 +439,7 @@ ssh root@<device> ota-check
 
 Same logic as boot-time `S99otacheck` — no reboot required. Refuses to run if `upgrade_available=1` (current slot not yet committed).
 
-### 7.7 Region change
+### 8.7 Region change
 
 ```
 ssh root@<device>
@@ -369,7 +447,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 /etc/init.d/S80dockercompose restart
 ```
 
-### 7.8 Recovery procedures
+### 8.8 Recovery procedures
 
 | Situation | Action |
 |---|---|
@@ -377,11 +455,124 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | `upgrade_available=1` stuck after successful TTN connection | `S98confirm` didn't run or crashed. Manually: `fw_setenv upgrade_available 0; fw_setenv bootcount 0`. |
 | Neither slot boots | U-Boot recovery. If U-Boot is healthy, interrupt with Ctrl-C at serial, `rockusb 0 mmc 0`, reflash via `rkdeveloptool`. |
 | Corrupt U-Boot env | Env is redundant (primary + backup). If both corrupted, default env is used (device still boots slot A but lacks rollback state). `fw_setenv` writes fresh values on next boot. |
-| `rkdeveloptool` needed but case is sealed | Enter download mode from serial: Ctrl-C to U-Boot, `rockusb 0 mmc 0` (requires pre-routed USB cable per § 7.3 Option B). |
+| `rkdeveloptool` needed but case is sealed | Enter download mode from serial: Ctrl-C to U-Boot, `rockusb 0 mmc 0` (requires pre-routed USB cable per § 8.3 Option B). |
 
-## 8. Verification & Validation
+## 9. Developer Guide — Making Changes OTA-Compatible
 
-### 8.1 Phase 1 verification
+This chapter is for contributors changing the firmware. The goal is concrete: tell you, before you open a PR, what survives an OTA update on a deployed device, what gets replaced, what is frozen forever, and where each kind of change must live to be delivered safely. The deeper rationale for each rule lives in the corresponding requirement (§ 5), constraint (§ 5.3), risk (§ 6), or session-6 learning (§ 12.2) — this chapter cross-references rather than duplicates.
+
+### 9.1 The OTA contract — what changes vs. what's frozen
+
+Three buckets, one source of truth. Every file you touch falls into exactly one of them; commit-time decisions are easier when you know which.
+
+| Bucket | What's in it | OTA behaviour |
+|---|---|---|
+| **A/B-replaced** | Kernel `Image`, DTB, modules, all of `/usr`, the rootfs overlay (`/etc`, `/lib`, `/sbin`, `/bin` defaults), shipped configs, init scripts, `ota-check`, `S98confirm`, SWUpdate's `swupdate.config` baked into the binary, `sw-description.tmpl`, `os-release`. | Written to the inactive A/B slot on every successful OTA, swapped in at the next boot. **The unit of OTA delivery.** |
+| **Persistent** | `/data` (partition 5): TTN key, Docker images & metadata, `/data/overlay/{usr,etc,var_lib}/upper` (overlayfs writes), user-supplied `/data/docker-compose.yml`, anything else under `/data`. | Untouched by SWUpdate. Survives every update *and* every rollback. |
+| **Frozen at factory flash** | `u-boot-rockchip.bin` (idbloader + SPL + FIT + BL31 + U-Boot proper), the U-Boot env *defaults* compiled into the binary, the partition layout (`genimage.cfg` regions and offsets), the env-partition offsets in `linxdot.fragment`. | Never updated by OTA. Changing any of them in the source tree means every deployed device needs a one-time `rkdeveloptool` reflash to receive the change (constraint **C-4**). |
+
+The corollary is simple: **if your change must reach already-deployed devices without a truck roll, it must end up in the A/B-replaced bucket.** Everything else is one-shot at factory time.
+
+### 9.2 Where to put what — a decision table
+
+| Goal | File location | OTA behaviour |
+|---|---|---|
+| Default config file (every device gets this baseline) | `board/linxdot/overlay/<path>` | Replaced on every OTA — your default ships in the new rootfs. |
+| Operator-customizable config | Document a `/data/<...>` override + a bind-mount or symlink in the init script (see `S01mountall`'s `/data/docker-compose.yml` pattern) | Operator's override survives OTA; firmware default is always the latest from the rootfs. |
+| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S60dockerd` → `S80dockercompose` → `S98confirm` → `S99otacheck`). |
+| New userspace tool / agent | `board/linxdot/overlay/usr/sbin/<name>`, or a Buildroot package under `package/<name>/` | Replaced on every OTA. |
+| Persistent application state | `/data/<your-app>/` — write at runtime, document the path | Survives OTA. **Never use `/var`, `/etc`, `/root`, `/home` as a "persistent" location** — see § 9.3. |
+| New kernel module (Phase 1–4) | Add prebuilt under `board/linxdot/modules/<kernel-version>/` (LFS-tracked) | Replaced on every OTA via `post-build.sh`. Add the file to the CI base-hash (§ 9.6). |
+| New kernel feature (Phase 2+) | Buildroot kernel defconfig fragment | Replaced on every OTA. |
+| New SX1302 / Basics Station setting | Either patch `board/linxdot/overlay/etc/docker-compose.yml` (default for everyone) or document via env vars / `/data/docker-compose.yml` override | Default replaced on every OTA; per-device override survives. |
+
+### 9.3 Common pitfalls — the overlayfs traps
+
+The read-only rootfs is union-mounted with overlayfs uppers on `/data` for `/usr`, `/var/lib`, and `/etc`. That gives operators a writable filesystem on top of an immutable image, but it creates two failure modes that have already burned us once each (§ 12.2 captures the post-mortems).
+
+**Trap 1: runtime edits to `/etc/<x>` mask future firmware fixes.**
+Anything written at runtime under `/etc`, `/usr`, or `/var/lib` lands in `/data/overlay/<dir>/upper` and **persists across OTA**. After OTA, the new rootfs ships an updated lower, but the upper still wins. So if a future firmware ships a fix to `/etc/docker-compose.yml`, the device that was patched at runtime keeps the broken (or old) version.
+
+*The rule:* **shipped defaults belong in the rootfs overlay (`board/linxdot/overlay/`); per-device customizations belong on `/data` with a bind-mount or symlink in an init script.** The current pattern is `/data/docker-compose.yml` → bind-mounted over `/etc/docker-compose.yml` by `S01mountall`. Replicate that pattern for any new config file you expect operators to override.
+
+**Trap 2: don't overlay a path whose target is a symlink.**
+`/var/log -> ../tmp` (Buildroot default). Mounting an overlay at `/var/log` resolves through the symlink onto `/tmp`, replacing the `S00datapart` tmpfs with a `/data`-backed overlay. A 500 MB OTA download then fills `/data`'s 487 MiB before the slot write finishes. Diagnostic: `mountpoint -q /tmp` returns true on a healthy boot, false if you've shadowed it. `S01mountall` no longer overlays `/var/log` (commit `b3ccf3e`); follow the same lead for any new overlay target.
+
+**Trap 3: `/tmp` is sized for current-bundle downloads, not arbitrary growth.**
+`ota-check` does a pre-flight `df /tmp` against `manifest.json`'s `size` field and refuses the download if free space is insufficient. If you grow the rootfs past a free-space margin (currently ~500 MiB on a 1 GiB tmpfs), bundle downloads start failing on devices with low overlay churn. Either keep the rootfs under that bound, or change `ota-check` to stream into a different location.
+
+**Trap 4: A/B slot-portability needs `index=off,xino=off,redirect_dir=off` on every overlay mount.**
+The `/data` upper rides between two different rootfs lowers (slots A and B have different ext4 inode numbers). Default `index=on/xino=on` caches origin file-handle hints from the FIRST mount, then ESTALE-rejects (`err=-116`) on the slot's first boot. **All three options** must be present on every `mount -t overlay` line — `tests/test_consistency.sh` enforces this statically.
+
+**Trap 5: busybox userspace lacks `pgrep`.**
+`pidof <name> >/dev/null` is the busybox-friendly substitute. The static check in `tests/test_consistency.sh` greps every overlay shell script for stray `pgrep` and fails the build.
+
+### 9.4 Bootloader-touching changes (the C-4 wall)
+
+Constraint **C-4** (§ 5.3) is absolute: the bootloader blob is not OTA-updatable. Any change to one of the following requires every deployed device to be `rkdeveloptool`-reflashed to receive it:
+
+- `board/linxdot/uboot/linxdot.fragment` (U-Boot Kconfig)
+- `board/linxdot/uboot/env.txt` (compiled-in env defaults — *not* runtime env)
+- `board/linxdot/boot.cmd` / `boot.scr` content (note: this is *also* in the boot partition and *is* OTA-replaceable; only the U-Boot-side bootcmd is frozen)
+- `board/linxdot/genimage.cfg` partition offsets, sizes, or count
+- `board/linxdot/overlay/etc/fw_env.config` env partition offsets
+
+Three checks before you merge any change to the above:
+
+1. **Run `sh tests/test_consistency.sh` locally.** It cross-validates that env offsets / sizes match across the U-Boot fragment, `fw_env.config`, `env.txt`, and `genimage.cfg`. Drift here means U-Boot writes to one location and Linux's `libubootenv` reads from another, which silently bricks rollback.
+2. **Verify the fragment's Kconfig intent without burning a 30-min CI base-build.** Clone upstream U-Boot at the pinned version, `make quartz64-a-rk3566_defconfig`, append your fragment to `.config`, run `make olddefconfig`, and inspect the result. Be aware: Kconfig's `default y if !(...)` rules fire only at `defconfig` time, *not* `olddefconfig` (which is what fragment-merging uses). The current `# CONFIG_ENV_IS_NOWHERE is not set` line in the fragment exists for exactly this reason — see § 12.1 session-5 learnings for the full story.
+3. **Plan the migration path.** A bootloader change requires a new factory-image release **and** an explicit operator action (the `rkdeveloptool wl` re-flash). Document this in the release notes and in `Docs/linxdot_fsd.md § 8.4` (the migration procedure). `/data` is preserved across the re-flash by genimage's keep-data flag, but operator instructions must call this out.
+
+### 9.5 SWUpdate / `sw-description` changes
+
+`board/linxdot/swupdate/swupdate.config` is the source of truth for the SWUpdate binary's compiled feature set, and `board/linxdot/swupdate/sw-description.tmpl` is the per-bundle install recipe. Both have non-obvious failure modes documented in § 12.2.
+
+**Three rules that catch all the recurring SWUpdate bugs we've hit:**
+
+1. **`swupdate.config` Kconfig symbol names must be exact.** The upstream symbol for U-Boot bootloader plugin is `CONFIG_UBOOT` — not `CONFIG_BOOTLOADER_UBOOT`. `olddefconfig` silently drops misnamed symbols, the binary ships missing the feature, and bundles get rejected at install time with messages like `"Registered bootloaders: none loaded"`. Read the SWUpdate Kconfig source for any new symbol you add.
+2. **Plugin and handler are separate symbols.** `CONFIG_UBOOT=y` registers the libubootenv-backed *plugin*; `CONFIG_BOOTLOADERHANDLER=y` registers the *image handler* that dispatches `bootenv:` sections in `sw-description`. Both are required to write U-Boot env from a bundle. Without the handler you get `"bootloader support absent but sw-description has bootloader section!"` even though `print_registered_bootloaders` says `uboot loaded`. `tests/test_consistency.sh` enforces both being on whenever a `bootenv:` section appears in the template.
+3. **The selector splits at the FIRST comma only.** SWUpdate's `parse_image_selector` reads `-e <set>,<mode>` and assigns `set` = first segment, `mode` = entire remainder including any further commas. The libconfig parser then constructs path `software.<set>.<mode>` and runs a single lookup. A nested `software.stable.linxdot-ld1001.target-B` group is unreachable from selector `stable,linxdot-ld1001,target-B` — that asks for a literal libconfig key `"linxdot-ld1001,target-B"` (single key with embedded comma). Keep the template flat: `software.stable.target-{A,B}`, with hardware identity in `hardware-compatibility = ["linxdot-ld1001"]`. The static test fails on any embedded comma in the mode key.
+
+**Adding a new partition target.** Both `target-A` and `target-B` selections must be updated symmetrically — one writing to `p1`+`p2`, the other to `p3`+`p4`. Skipping one breaks rollback for that direction. The partition number → device-node mapping (`/dev/mmcblk0pN` in `sw-description` is U-Boot's view; Linux sees the same partitions as `/dev/mmcblk1pN`) is the same trap as `root=`. Test on real hardware in both directions before signing off.
+
+### 9.6 Signing key and CI base-hash discipline
+
+**Signing keys.** The OTA chain enforces signature verification both ways:
+
+- The public half lives at `board/linxdot/overlay/etc/swupdate/public.pem`, baked into the rootfs.
+- The private half lives only in the GitHub Actions secret `OTA_SIGNING_KEY`. CI signs `sw-description` with `openssl dgst -sha256 -sign` (raw RSA-PKCS1v15) on every release.
+- `swupdate.config` must have `CONFIG_SIGNED_IMAGES=y` AND `CONFIG_SIGALG_RAWRSA=y`. `tests/test_consistency.sh` enforces the bidirectional implication — if `public.pem` is in the overlay, signing must be compiled in; if signing is compiled in, `public.pem` must be in the overlay. Either side broken in isolation silently disables verification (rc16 shipped public.pem but `CONFIG_SIGNED_IMAGES=n` and `swupdate -k` returned `invalid option -- 'k'` — every bundle was accepted).
+
+Rotation procedure is in § 8.5. Don't rotate without first shipping the new public key in a release that the existing private key still signs.
+
+**CI base-hash discipline.** The CI pipeline has a `detect-changes` job that hashes a list of files; if the hash matches the cached `base-latest` prerelease, the 30-min base-build is skipped and the release job composes from yesterday's cached rootfs. **Files that affect the Buildroot base build but aren't in this hash will silently bypass rebuild** — your fix appears CI-green but ships in a stale rootfs. The current hash list (in `.github/workflows/build.yml`) covers `configs/linxdot_ld1001_defconfig`, `board/linxdot/uboot/linxdot.fragment`, `board/linxdot/uboot/env.txt`, `board/linxdot/post-build.sh`, `board/linxdot/swupdate/swupdate.config`, plus the LFS blobs and prebuilt modules.
+
+If your change touches Buildroot's base-build inputs, **add the file to the hash list in the same PR.** The release job re-applies `board/linxdot/overlay/`, `board/linxdot/swupdate/sw-description.tmpl`, `board/linxdot/genimage.cfg`, and `board/linxdot/post-image.sh` on every run, so those don't need to be hashed — they pick up changes without a rebuild.
+
+### 9.7 Pre-merge checklist
+
+Before opening a PR for a change that's intended to ship via OTA:
+
+- [ ] `sh tests/test_consistency.sh` passes locally.
+- [ ] If your change touches the U-Boot fragment, env, partition layout, or `fw_env.config`: documented as a bootloader-frozen change (§ 9.4) and migration plan added to release notes.
+- [ ] If your change adds persistent state: stored under `/data/<...>`, not in the overlayfs traps. Documented in the relevant init script.
+- [ ] If your change adds an init script: numbered consistently with the existing `S##` ordering; exits 0 on `start`/`stop`; doesn't block boot longer than necessary (S99otacheck pattern: background everything).
+- [ ] If your change touches signing or `swupdate.config`: bidirectional signature test (signed bundle accepted, unsigned bundle refused) verified on hardware.
+- [ ] If your change touches a Buildroot base-build input: the file is in the `detect-changes` hash list in `.github/workflows/build.yml`.
+- [ ] If your change can be hardware-tested: TC-4.4 (happy path) re-run locally on the Workbench LD1001 and the result documented in the PR description.
+
+### 9.8 Verification harness
+
+Two test suites underpin the rules in this chapter, both running in CI on every push:
+
+- **`tests/test_consistency.sh`** — static checks that don't need a built image. Catches drift between fragment / env / fw_env.config / genimage.cfg, missing CONFIG_BOOTLOADERHANDLER when `bootenv:` is in the template, embedded commas in selectors, missing `index=off`/`xino=off` on overlay mounts, stray `pgrep` calls, public.pem ↔ CONFIG_SIGNED_IMAGES asymmetry. Each rule was added in response to a runtime bug we hit on hardware (§ 12.2).
+- **`tests/test_ota_state_machine.sh`** — a 10-scenario shell-level simulation of the bootcount / altbootcmd state machine, exercising healthy boots, transient hangs, trial-boot commit, rollback in both directions, bootlimit edge cases. Catches FR-4.x logic regressions before hardware.
+
+If you add a runtime gotcha that bit you on hardware, add a static check to `test_consistency.sh` in the same PR — that's how the existing checks were built up over Phase 4.
+
+## 10. Verification & Validation
+
+### 10.1 Phase 1 verification
 
 | Test ID | Feature | Procedure | Expected |
 |---|---|---|---|
@@ -395,7 +586,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | TC-1.8 | Stable MAC | `ip link show eth0` before and after reflash | MAC unchanged (derived from eMMC CID) |
 | TC-1.9 | TTN connection | Configure `tc_key.txt`, restart compose, `docker logs basicstation` | `EUI Source: chip`, successful WebSocket upgrade, INFO msgs from LNS |
 
-### 8.2 Phase 3 verification
+### 10.2 Phase 3 verification
 
 | Test ID | Feature | Procedure | Expected |
 |---|---|---|---|
@@ -406,7 +597,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | TC-3.5 | Healthy-slot transient resilience | Force enough reboots to exceed `bootlimit` without committing (simulate crash before `S98confirm` on slot A) | `altbootcmd` fires, resets `bootcount`, slot remains A (not flipped) |
 | TC-3.6 | Rollback on broken slot | Install garbage to rootfs_b, `fw_setenv boot_slot B upgrade_available 1 bootcount 0`, reboot | U-Boot tries B, fails N times, `altbootcmd` flips to A, device boots A |
 
-### 8.3 Phase 4 verification
+### 10.3 Phase 4 verification
 
 | Test ID | Feature | Procedure | Expected |
 |---|---|---|---|
@@ -417,7 +608,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | TC-4.5 | End-to-end rollback | Device on v0.1.1 (committed), publish deliberately-broken v0.1.2 | Device attempts v0.1.2, fails, `altbootcmd` rolls back to v0.1.1 within `bootlimit` cycles |
 | TC-4.6 | Manual trigger | `ssh root@<device> ota-check` | Same flow as boot-time, runs in foreground |
 
-### 8.4 Traceability Matrix
+### 10.4 Traceability Matrix
 
 | Requirement | Priority | Test Case(s) | Status |
 |---|---|---|---|
@@ -458,7 +649,7 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | NFR-4.1 | Should | CI reproducibility | Covered |
 | NFR-4.2 | Should | Build review | Covered |
 
-## 9. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Likely cause | Diagnostic | Corrective action |
 |---|---|---|---|
@@ -467,87 +658,12 @@ vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
 | `TC_KEY: NOT CONFIGURED` | `tc_key.txt` placeholder still in place | `cat /data/basicstation/tc_key.txt` | Replace file with real key; `/etc/init.d/S80dockercompose restart` |
 | `EUI Source: eth0` (not `chip`) | Concentrator not reset before container start | `docker logs basicstation` | `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start`; `docker-compose restart` |
 | Gateway not connecting to TTN | Bad API key, wrong region, firewall | `docker logs basicstation` | Verify key and region; open outbound 443 |
-| OTA never triggers | Device still on Phase 1 single-slot image | `fw_printenv` returns error | Migrate per § 7.4 |
+| OTA never triggers | Device still on Phase 1 single-slot image | `fw_printenv` returns error | Migrate per § 8.4 |
 | OTA triggers but rolls back | New slot fails health gate | Serial console during trial boot: check kernel panic, init errors, Docker failures | Fix underlying issue in firmware, re-release |
 | `upgrade_available=1` stuck | `S98confirm` didn't run or crashed | `logger -t ota` entries | `fw_setenv upgrade_available 0; fw_setenv bootcount 0` |
 | Can't boot either slot | Bootloader broken or both slots corrupted | Serial console for U-Boot output | `rockusb` from U-Boot prompt; reflash via `rkdeveloptool` |
 
-## 10. Appendix
-
-### 10.1 Constants
-
-| Constant | Value | Defined in |
-|---|---|---|
-| Console baud | 1,500,000 (Phase 1–3) | vendor DTB `stdout-path` |
-| `CONFIG_ENV_OFFSET` | `0xE00000` (14 MiB) | `board/linxdot/uboot/linxdot.fragment`, `overlay/etc/fw_env.config`, `genimage.cfg` |
-| `CONFIG_ENV_SIZE` | `0x10000` (64 KiB) | same |
-| `CONFIG_ENV_OFFSET_REDUND` | `0xE10000` | same |
-| `bootlimit` | `3` | `board/linxdot/uboot/env.txt` |
-| TF-A version | `v2.12.0` source (built but unused; vendor BL31 overrides at U-Boot link, see below) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION_VALUE` |
-| TF-A platform | `rk3568` (for RK3566 by convention) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM` |
-| **Effective BL31** | `bin/rk35/rk3568_bl31_v1.43.elf` (rkbin) — required because vendor 5.15 kernel calls Rockchip-vendor SIP SMCs upstream TF-A does not implement | `BR2_PACKAGE_ROCKCHIP_RKBIN_BL31_FILENAME` |
-| U-Boot defconfig base | `quartz64-a-rk3566` | defconfig `BR2_TARGET_UBOOT_BOARD_DEFCONFIG` |
-| DDR TPL blob | `bin/rk35/rk3568_ddr_1560MHz_v1.18.bin` (rkbin) | `BR2_PACKAGE_ROCKCHIP_RKBIN_TPL_FILENAME` |
-| OTA manifest URL | `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` | `overlay/usr/sbin/ota-check` |
-
-### 10.2 Extraction from CrankkOS (historical, Phase 1 bring-up)
-
-```
-# Mount source partitions
-sudo mount -o loop,offset=$((40960*512)),ro crankkos-linxdotrk3566-1.0.0-pktfwd.img /tmp/crankk-boot
-sudo losetup -f --show -o $((204800*512)) --sizelimit $((1024000*512)) crankkos.img
-sudo mount -o ro /dev/loopN /tmp/crankk-root
-
-# Extract boot blobs (raw dd)
-dd if=crankkos.img of=board/linxdot/blobs/idbloader.img bs=512 skip=64    count=8000
-dd if=crankkos.img of=board/linxdot/blobs/u-boot.itb   bs=512 skip=16384  count=16384
-
-# Kernel, DTB, modules, firmware copied from the extracted filesystems.
-```
-
-### 10.3 Useful commands
-
-```
-# On the device
-fw_printenv                            # full U-Boot env
-fw_printenv boot_slot bootcount upgrade_available
-fw_setenv upgrade_available 0          # force-commit slot
-ota-check                              # manual update check
-/etc/init.d/S80dockercompose status    # Basics Station + TC_KEY state
-docker logs basicstation               # LNS connection log
-
-# On the host (via Workbench)
-python3 -c "import serial; s=serial.serial_for_url('rfc2217://192.168.0.87:4003', baudrate=1500000); ..."
-curl http://192.168.0.87:8080/api/devices      # workbench slot map
-ssh pi@192.168.0.87 'sudo rkdeveloptool ld'    # rkdeveloptool status (needs USB routed)
-```
-
-### 10.4 Repository layout
-
-```
-configs/linxdot_ld1001_defconfig   Buildroot defconfig
-external.desc + external.mk + Config.in   BR2_EXTERNAL tree
-board/linxdot/
-  boot.cmd                         U-Boot boot script source (compiled to boot.scr)
-  genimage.cfg                     GPT partition layout + raw regions
-  post-build.sh                    Rootfs finalisation (kernel, modules, os-release)
-  post-image.sh                    boot.scr compile, env image, genimage invocation
-  uboot/linxdot.fragment           U-Boot Kconfig overrides (env, baud, bootcount)
-  uboot/env.txt                    Default U-Boot env (boot_slot, altbootcmd)
-  swupdate/sw-description.tmpl     SWUpdate manifest template
-  blobs/                           Phase 1 vendor binaries (Git LFS)
-  modules/5.15.104/                Prebuilt kernel modules (Git LFS)
-  firmware/brcm/                   WiFi firmware (gitignored, licence)
-  overlay/etc/fw_env.config        Linux-side U-Boot env locator
-  overlay/etc/init.d/S*            Init scripts
-  overlay/usr/sbin/ota-check       OTA agent CLI
-package/docker-compose-v1/         Static aarch64 docker-compose binary
-scripts/gen-signing-key.sh         One-time signing-key generator
-tests/                             Static + runtime test suite
-.github/workflows/build.yml        CI: validate, base-build, release
-```
-
-## 11. Open Items / Backlog
+## 12. Open Items / Backlog
 
 Consolidated list of work remaining per phase. Close an item by deleting its line (with the commit that closes it). Cross-reference FR/NFR/TC IDs where applicable; the state flags are:
 
@@ -555,7 +671,7 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - **`[~]`** in progress / partial
 - **`[x]`** done (keep briefly for visibility, prune when a phase closes)
 
-### 11.1 Phase 3 — Bootloader from source
+### 12.1 Phase 3 — Bootloader from source
 
 **Software / CI (closed):**
 - [x] TF-A v2.12.0 pinned; rk3568 plat builds
@@ -566,7 +682,7 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - [x] TC-3.1 consistency tests (`tests/test_consistency.sh`) — runs in CI validate
 - [x] TC-3.2 state machine simulation (`tests/test_ota_state_machine.sh`) — runs in CI validate
 
-**Hardware validation (open — FSD §3.3 exit criteria):**
+**Hardware validation (open — FSD §4.3 exit criteria):**
 - [x] **Pre-flight: BootROM non-secure-lock verification** (evidence-cleared 2026-04-23: SPL prints `Verified-boot: 0`, unsigned `-dirty` builds run).
 - [x] Physical flashing path from Workbench Pi (`rkdeveloptool` via routed USB-C at SLOT1/2, `boot_merger`-packed loader for `db` — see runbook §0 + §8.2).
 - [x] Runbook `Docs/phase3_hardware_validation.md` covering BootROM check, flashing, and TC-3.3..TC-3.6 procedures with pass criteria.
@@ -599,7 +715,7 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 **Defense-in-depth (open — non-blocking):**
 - [ ] Bake `altbootcmd` into U-Boot compiled-in default env (via `CONFIG_USE_DEFAULT_ENV_FILE=y` + pre-build hook to stage `env.txt`). Currently lives only in flashed `uboot-env.bin`; compiled-in fallback is missing. FR-4.4 defense case.
 
-### 11.2 Phase 4 — OTA update layer
+### 12.2 Phase 4 — OTA update layer
 
 **Software scaffolding (present — verified end-to-end on rc12+):**
 - [x] `ota-check` script (FR-3.1, FR-3.2, FR-3.3, FR-3.7) — in `board/linxdot/overlay/usr/sbin/ota-check`.
@@ -633,14 +749,90 @@ The Phase 4 hardware bring-up peeled four nested SWUpdate-config bugs and two us
 - **`swupdate.config` is the source of truth for the swupdate binary.** The buildroot package wrapper passes the kconfig file through `make olddefconfig` and links against host libs gated by `BR2_PACKAGE_*` env vars (HAVE_LIBSSL/HAVE_LIBCONFIG/HAVE_LIBUBOOTENV). Misnamed kconfig symbols are silently dropped; missing BR2 packages disable the corresponding feature even if the swupdate-side symbol is set. The pairing of the two has to be right for the binary to actually have the feature compiled in.
 - **Public key in overlay is not enough — `CONFIG_SIGNED_IMAGES=y` must also be on.** rc16 shipped `public.pem` in the rootfs and CI signed `sw-description`, but `ota-check`'s `swupdate -k /etc/swupdate/public.pem` produced `swupdate: invalid option -- 'k'` and exited 0. swupdate's argument parser only registers `-k` when the verifier is compiled in (`CONFIG_SIGNED_IMAGES=y`); without it `getopt` rejects the flag, the verification path is silently skipped, and any bundle (signed or not) is accepted. Caught by the test suite now: if the overlay public.pem exists, `test_consistency.sh` requires `CONFIG_SIGNED_IMAGES=y` AND `CONFIG_SIGALG_RAWRSA=y` (the algorithm matching CI's `openssl dgst -sha256 -sign` raw RSA-PKCS1v15 output). The reverse implication is also enforced — turning on signing without shipping a public key would brick every bundle on hardware.
 
-### 11.3 Phase 5 — Curated in-tree DTS (not started)
+### 12.3 Phase 5 — Curated in-tree DTS (not started)
 
 - [ ] Replace vendor `rk3566-linxdot.dtb` with in-tree DTS covering all peripherals (eth, WiFi, SPI for SX1302, eMMC, USB, UART2 @ 1.5 Mbaud).
 - [ ] Remove C-2 console-baud constraint once DTS is in-tree.
 
-### 11.4 Housekeeping
+### 12.4 Housekeeping
 
 - [x] Hardware validation runbook — `Docs/phase3_hardware_validation.md`.
-- [ ] Prune Phase 1 vendor blobs from `board/linxdot/blobs/` (`idbloader.img`, `u-boot.itb`) once Phase 3 is hardware-validated and the branch merges — currently kept as a rollback fallback for the pre-A/B migration path (C-5, §7.4).
+- [ ] Prune Phase 1 vendor blobs from `board/linxdot/blobs/` (`idbloader.img`, `u-boot.itb`) once Phase 3 is hardware-validated and the branch merges — currently kept as a rollback fallback for the pre-A/B migration path (C-5, §8.4).
 - [ ] Migrate CLAUDE.md to describe the merged (Phase 3+) baseline once `OTA` → `main`.
+
+
+## 13. Appendix
+
+### 13.1 Constants
+
+| Constant | Value | Defined in |
+|---|---|---|
+| Console baud | 1,500,000 (Phase 1–3) | vendor DTB `stdout-path` |
+| `CONFIG_ENV_OFFSET` | `0xE00000` (14 MiB) | `board/linxdot/uboot/linxdot.fragment`, `overlay/etc/fw_env.config`, `genimage.cfg` |
+| `CONFIG_ENV_SIZE` | `0x10000` (64 KiB) | same |
+| `CONFIG_ENV_OFFSET_REDUND` | `0xE10000` | same |
+| `bootlimit` | `3` | `board/linxdot/uboot/env.txt` |
+| TF-A version | `v2.12.0` source (built but unused; vendor BL31 overrides at U-Boot link, see below) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION_VALUE` |
+| TF-A platform | `rk3568` (for RK3566 by convention) | defconfig `BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM` |
+| **Effective BL31** | `bin/rk35/rk3568_bl31_v1.43.elf` (rkbin) — required because vendor 5.15 kernel calls Rockchip-vendor SIP SMCs upstream TF-A does not implement | `BR2_PACKAGE_ROCKCHIP_RKBIN_BL31_FILENAME` |
+| U-Boot defconfig base | `quartz64-a-rk3566` | defconfig `BR2_TARGET_UBOOT_BOARD_DEFCONFIG` |
+| DDR TPL blob | `bin/rk35/rk3568_ddr_1560MHz_v1.18.bin` (rkbin) | `BR2_PACKAGE_ROCKCHIP_RKBIN_TPL_FILENAME` |
+| OTA manifest URL | `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` | `overlay/usr/sbin/ota-check` |
+
+### 13.2 Extraction from CrankkOS (historical, Phase 1 bring-up)
+
+```
+# Mount source partitions
+sudo mount -o loop,offset=$((40960*512)),ro crankkos-linxdotrk3566-1.0.0-pktfwd.img /tmp/crankk-boot
+sudo losetup -f --show -o $((204800*512)) --sizelimit $((1024000*512)) crankkos.img
+sudo mount -o ro /dev/loopN /tmp/crankk-root
+
+# Extract boot blobs (raw dd)
+dd if=crankkos.img of=board/linxdot/blobs/idbloader.img bs=512 skip=64    count=8000
+dd if=crankkos.img of=board/linxdot/blobs/u-boot.itb   bs=512 skip=16384  count=16384
+
+# Kernel, DTB, modules, firmware copied from the extracted filesystems.
+```
+
+### 13.3 Useful commands
+
+```
+# On the device
+fw_printenv                            # full U-Boot env
+fw_printenv boot_slot bootcount upgrade_available
+fw_setenv upgrade_available 0          # force-commit slot
+ota-check                              # manual update check
+/etc/init.d/S80dockercompose status    # Basics Station + TC_KEY state
+docker logs basicstation               # LNS connection log
+
+# On the host (via Workbench)
+python3 -c "import serial; s=serial.serial_for_url('rfc2217://192.168.0.87:4003', baudrate=1500000); ..."
+curl http://192.168.0.87:8080/api/devices      # workbench slot map
+ssh pi@192.168.0.87 'sudo rkdeveloptool ld'    # rkdeveloptool status (needs USB routed)
+```
+
+### 13.4 Repository layout
+
+```
+configs/linxdot_ld1001_defconfig   Buildroot defconfig
+external.desc + external.mk + Config.in   BR2_EXTERNAL tree
+board/linxdot/
+  boot.cmd                         U-Boot boot script source (compiled to boot.scr)
+  genimage.cfg                     GPT partition layout + raw regions
+  post-build.sh                    Rootfs finalisation (kernel, modules, os-release)
+  post-image.sh                    boot.scr compile, env image, genimage invocation
+  uboot/linxdot.fragment           U-Boot Kconfig overrides (env, baud, bootcount)
+  uboot/env.txt                    Default U-Boot env (boot_slot, altbootcmd)
+  swupdate/sw-description.tmpl     SWUpdate manifest template
+  blobs/                           Phase 1 vendor binaries (Git LFS)
+  modules/5.15.104/                Prebuilt kernel modules (Git LFS)
+  firmware/brcm/                   WiFi firmware (gitignored, licence)
+  overlay/etc/fw_env.config        Linux-side U-Boot env locator
+  overlay/etc/init.d/S*            Init scripts
+  overlay/usr/sbin/ota-check       OTA agent CLI
+package/docker-compose-v1/         Static aarch64 docker-compose binary
+scripts/gen-signing-key.sh         One-time signing-key generator
+tests/                             Static + runtime test suite
+.github/workflows/build.yml        CI: validate, base-build, release
+```
 

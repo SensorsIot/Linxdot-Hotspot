@@ -129,7 +129,7 @@ If a newer version is available it'll download, verify, install, and reboot — 
 | Gateway not showing on TTN | Verify EUI matches registration; `docker logs basicstation` for connection errors. |
 | Repeated `excessive clock drifts (... ppm, threshold 100ppm)` | SX1302 reference oscillator drift. Cosmetic for the LNS link, but degrades RX timing on class-B/C — log a hardware issue if persistent. |
 
-See `Docs/linxdot_fsd.md § 9 Troubleshooting` for the full list including rollback diagnosis.
+See `Docs/linxdot_fsd.md § 11 Troubleshooting` for the full list including rollback diagnosis.
 
 ---
 
