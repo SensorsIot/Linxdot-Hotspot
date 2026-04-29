@@ -5,8 +5,57 @@
 
 LINK_TIMEOUT=30
 CID_PATH="/sys/class/mmc_host/mmc1/mmc1:0001/cid"
+EMMC_BOOT0="/dev/mmcblk1boot0"
+DATA_MAC="/data/eth0_mac"
+
+# Read a stored MAC from /dev/mmcblk1boot0. The eMMC HW boot partition lives
+# outside the GPT, so MACs written by /usr/sbin/set-eth-mac survive both OTA
+# and full factory re-flashes. Layout: 8-byte "OLNXMAC1" magic, 6 raw MAC
+# bytes, 18 zero bytes. Echoes a colon-separated MAC and returns 0 on success.
+read_emmc_mac() {
+    [ -b "$EMMC_BOOT0" ] || return 1
+    raw=$(dd if="$EMMC_BOOT0" bs=1 count=14 status=none 2>/dev/null \
+          | od -An -tx1 | tr -d ' \n')
+    [ "${#raw}" = 28 ] || return 1
+    # First 8 bytes (16 hex chars) must be "OLNXMAC1" = 4f4c4e584d414331.
+    [ "$(echo "$raw" | cut -c1-16)" = "4f4c4e584d414331" ] || return 1
+    b1=$(echo "$raw" | cut -c17-18)
+    b2=$(echo "$raw" | cut -c19-20)
+    b3=$(echo "$raw" | cut -c21-22)
+    b4=$(echo "$raw" | cut -c23-24)
+    b5=$(echo "$raw" | cut -c25-26)
+    b6=$(echo "$raw" | cut -c27-28)
+    # Reject all-zero, all-ones, and multicast.
+    case "$b1$b2$b3$b4$b5$b6" in
+        000000000000|ffffffffffff|FFFFFFFFFFFF) return 1 ;;
+    esac
+    [ $(( 0x$b1 & 0x01 )) -eq 0 ] || return 1
+    echo "$b1:$b2:$b3:$b4:$b5:$b6"
+}
+
+# Read an admin override from /data/eth0_mac (single-line "aa:bb:cc:dd:ee:ff").
+read_data_mac() {
+    [ -r "$DATA_MAC" ] || return 1
+    mac=$(head -n1 "$DATA_MAC" 2>/dev/null | tr -d '[:space:]')
+    case "$mac" in
+        [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
+            echo "$mac"
+            ;;
+        *) return 1 ;;
+    esac
+}
 
 set_mac() {
+    if mac=$(read_emmc_mac); then
+        ip link set dev eth0 address "$mac"
+        echo "S40network: eth0 MAC set to $mac (from $EMMC_BOOT0)"
+        return
+    fi
+    if mac=$(read_data_mac); then
+        ip link set dev eth0 address "$mac"
+        echo "S40network: eth0 MAC set to $mac (from $DATA_MAC)"
+        return
+    fi
     cid=$(cat "$CID_PATH" 2>/dev/null)
     if [ -z "$cid" ]; then
         echo "S40network: no eMMC CID found, using random MAC"

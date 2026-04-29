@@ -1,0 +1,84 @@
+#!/bin/sh
+# /usr/sbin/set-eth-mac — store the eth0 MAC in /dev/mmcblk1boot0.
+#
+# The eMMC's hardware boot partitions live outside the GPT and are not touched
+# by SWUpdate or by `rkdeveloptool wl 0 image.img`, so a MAC written here
+# survives both OTA updates and a full factory re-flash. S40network reads
+# this record at boot and assigns it to eth0 before DHCP starts.
+#
+# Record layout (32 bytes at sector 0 of mmcblk1boot0):
+#   off  size  contents
+#   0    8     "OLNXMAC1"  (ASCII magic)
+#   8    6     MAC bytes   (binary, byte 0 must be unicast)
+#   14   18    zero        (reserved for future fields)
+#
+# Validation lives in S40network and rejects records that fail magic, are
+# all-zero / all-ones, or have the multicast bit set.
+
+set -eu
+
+DEV=/dev/mmcblk1boot0
+RO=/sys/block/mmcblk1boot0/force_ro
+
+usage() {
+    echo "usage: $0 <aa:bb:cc:dd:ee:ff>" >&2
+    echo "  Stores the given MAC in $DEV. Run once per device after factory flash." >&2
+    exit 1
+}
+
+[ $# -eq 1 ] || usage
+mac=$1
+
+case "$mac" in
+    [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+    *) echo "set-eth-mac: bad format: $mac (expected aa:bb:cc:dd:ee:ff)" >&2; exit 1 ;;
+esac
+
+case "$mac" in
+    00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|FF:FF:FF:FF:FF:FF)
+        echo "set-eth-mac: refusing to store $mac" >&2
+        exit 1
+        ;;
+esac
+
+b0=$(echo "$mac" | cut -d: -f1)
+b1=$(echo "$mac" | cut -d: -f2)
+b2=$(echo "$mac" | cut -d: -f3)
+b3=$(echo "$mac" | cut -d: -f4)
+b4=$(echo "$mac" | cut -d: -f5)
+b5=$(echo "$mac" | cut -d: -f6)
+
+# Reject multicast (lowest bit of byte 0 set).
+if [ $(( 0x$b0 & 0x01 )) -ne 0 ]; then
+    echo "set-eth-mac: refusing multicast MAC $mac" >&2
+    exit 1
+fi
+
+[ -b "$DEV" ] || { echo "set-eth-mac: $DEV not present" >&2; exit 1; }
+[ -w "$RO" ]  || { echo "set-eth-mac: $RO not writable (need root)" >&2; exit 1; }
+
+record=$(mktemp)
+trap 'rm -f "$record"; echo 1 > "$RO" 2>/dev/null || true' EXIT INT TERM
+
+# Build 32-byte record. BusyBox sh printf interprets \xNN; pad with 18 zeros.
+{
+    printf "OLNXMAC1\x$b0\x$b1\x$b2\x$b3\x$b4\x$b5"
+    dd if=/dev/zero bs=1 count=18 status=none
+} > "$record"
+
+size=$(wc -c < "$record")
+[ "$size" = "32" ] || { echo "set-eth-mac: built record is $size bytes, expected 32" >&2; exit 1; }
+
+echo 0 > "$RO"
+dd if="$record" of="$DEV" bs=512 count=1 conv=fsync status=none
+echo 1 > "$RO"
+
+# Verify by reading back.
+read_back=$(dd if="$DEV" bs=1 count=32 status=none | od -An -tx1 | tr -d ' \n')
+expect=$(od -An -tx1 < "$record" | tr -d ' \n')
+if [ "$read_back" != "$expect" ]; then
+    echo "set-eth-mac: verify FAILED — read $read_back, expected $expect" >&2
+    exit 1
+fi
+
+echo "set-eth-mac: stored $mac in $DEV (verified). Reboot or restart S40network to apply."
