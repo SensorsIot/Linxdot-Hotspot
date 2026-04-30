@@ -75,7 +75,7 @@ Phase 2 prompts you for:
 | TTN cluster | `eu1` (Europe) — or `nam1` / `au1` / `as1` |
 | TTN user or organization ID | your TTN handle |
 | User or organization | `u` (most common) |
-| Admin API key | paste anything containing `NNSXS.…` — the wizard extracts the token from whatever you pasted (whole console row, "API key: …" labels, surrounding whitespace all fine) |
+| Admin API key | the `NNSXS.…` value from the paragraph above (paste it however you copied it — surrounding labels or whitespace are fine, the wizard extracts the token) |
 | Gateway name | only asked for **new** registrations; default `linxdot-<eui>` |
 | Frequency plan | only asked for **new** registrations; default per cluster |
 
