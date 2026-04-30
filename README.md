@@ -174,6 +174,19 @@ Baud rate is **1,500,000** (1.5 Mbaud), 8N1. Console is also available remotely 
 
 ---
 
+## Useful commands
+
+Run on the device after `ssh root@<device-ip>`:
+
+| Command | What it does |
+|---|---|
+| `docker logs basicstation` | Live LoRa daemon log (uplinks, TLS handshake, drift warnings). Add `--tail 50` or `-f` to follow. |
+| `ota-check` | Trigger an OTA check now. Installs + reboots if a newer release is on GitHub. |
+| `cat /etc/os-release \| grep VERSION_ID` | Show the running firmware version. |
+| `fw_printenv boot_slot bootcount upgrade_available` | A/B slot status and OTA trial-boot flags. |
+| `/etc/init.d/S80dockercompose restart` | Restart basicstation (after editing `/data/docker-compose.yml`, etc.). |
+| `linxdot-setup` | Re-run the setup wizard. After setup is complete it prints status only; `rm /data/.setup-state` first to actually re-provision. |
+
 ## For developers
 
 | Document | Scope |
