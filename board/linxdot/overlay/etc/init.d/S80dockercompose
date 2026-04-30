@@ -61,6 +61,13 @@ case "$1" in
             exit 0
         fi
 
+        # Step the wall-clock if stale before bringing basicstation up —
+        # its WSS handshake to TTN will otherwise fail "cert not yet
+        # valid" until the boot-time S99otacheck (or a manual run)
+        # eventually steps it. Idempotent.
+        /usr/sbin/clock-bootstrap || \
+            echo "S80dockercompose: warning: clock-bootstrap failed; basicstation TLS may fail"
+
         echo "S80dockercompose: waiting for Docker"
         wait_for_docker || exit 1
 

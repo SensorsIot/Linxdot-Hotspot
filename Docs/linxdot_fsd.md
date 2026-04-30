@@ -101,7 +101,7 @@ OpenLinxdot is a custom Buildroot-based firmware that turns a **Linxdot LD1001**
 **High-level flow:**
 ```
 BootROM → idbloader (SPL + DDR init) → TF-A BL31 → U-Boot → boot.scr
-  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S45clock..S98confirm..S99otacheck
+  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S80dockercompose..S98confirm..S99otacheck
   → dockerd → docker-compose → basicstation → WebSocket TLS → TTN LNS
 ```
 
@@ -243,7 +243,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **FR-2.2** [Must]: The system shall determine `eth0`'s MAC by trying, in priority order: (1) a per-unit record at sector 0 of `/dev/mmcblk1boot0` (typically the device's case-printed MAC, written once via `linxdot-setup` or `set-eth-mac` — see § 8.3 *After first boot*); (2) an admin override at `/data/eth0_mac`; (3) the shared setup-fallback MAC `02:00:5d:01:01:01`. The boot0 record lives in the eMMC's hardware boot partition, outside the GPT, so it survives both OTA updates and `rkdeveloptool wl 0 image.img` factory re-flashes. The setup-fallback MAC is intentionally non-unique so operators have a known address to look for in their router's DHCP table on a freshly-flashed device; binding the case MAC via the wizard is the first provisioning step.
 - **FR-2.3** [Must]: The system shall obtain an IPv4 address via DHCP on `eth0`.
 - **FR-2.4** [Should]: The system shall synchronise time via NTP before TLS connections are attempted.
-- **FR-2.5** [Must]: On every boot, after `eth0` has an IPv4 address, the system shall step the wall-clock to a sane value via the HTTP `Date:` header from `http://github.com` (or a fallback) before any service that performs TLS validation starts. This is required because the LD1001 has no battery-backed RTC (constraint C-7).
+- **FR-2.5** [Must]: Before any TLS-validating service runs (basicstation's WSS to TTN, `ota-check`'s HTTPS fetch from GitHub) the system shall step the wall-clock to a sane value via NTP. The step is performed lazily by `/usr/sbin/clock-bootstrap` (idempotent: no-op if `date +%Y >= 2024`, otherwise runs `ntpd -gq <server>` against `pool.ntp.org` / `time.cloudflare.com` / `time.google.com` with a 30 s per-server watchdog) invoked from each consumer — `S80dockercompose` calls it before `docker-compose up`, `ota-check` calls it before its `curl`. This is required because the LD1001 has no battery-backed RTC (constraint C-7). Calling it from the consumers rather than from a generic init script keeps boot non-blocking when NTP is unreachable.
 
 #### Over-the-Air updates (Phase 4)
 - **FR-3.1** [Must]: The system shall poll `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` 60 seconds after boot and compare the `version` field against `/etc/os-release VERSION_ID`.
@@ -291,7 +291,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **C-4** The bootloader blob (`u-boot-rockchip.bin`, covering SPL + FIT with BL31 + U-Boot) is **not** updated by OTA. It remains as first written at factory-flash time. Updating it would require a new factory image and `rkdeveloptool`. This is intentional: there is no redundant bootloader slot, so a bad bootloader write would brick the device.
 - **C-5** Devices flashed with the pre-A/B (Phase 1) image cannot receive OTA updates. A one-time `rkdeveloptool` reflash with the A/B image is required to migrate. `/data` is recreated on reflash; `tc_key.txt` must be backed up beforehand.
 - **C-6** WiFi firmware (`firmware/brcm/`) is not distributable under the Broadcom licence and must be extracted from a CrankkOS image locally before building a WiFi-capable variant.
-- **C-7** The LD1001 has no battery-backed RTC. On every power loss the kernel clock resets to a stale value (observed: `2017-08-05`). Until the clock is stepped to a sane value, every service that does TLS server-cert validation (`basicstation`'s WSS to TTN, `ota-check`'s HTTPS fetch from GitHub) fails with "certificate is not yet valid". `S45clock` runs after `S40network` and before any TLS-using service to fix this from the HTTP `Date:` header. `ntpd` alone is insufficient — by default it refuses to step jumps over ~1000 s.
+- **C-7** The LD1001 has no battery-backed RTC. On every power loss the kernel clock resets to a stale value (observed: `2017-08-05`). Until the clock is stepped to a sane value, every service that does TLS server-cert validation (`basicstation`'s WSS to TTN, `ota-check`'s HTTPS fetch from GitHub) fails with "certificate is not yet valid". The bootstrap is `/usr/sbin/clock-bootstrap` — an idempotent helper that runs `ntpd -gq <server>` (`-g` lets the first adjust exceed the panic threshold; the system `ntpd` started by `S49ntp` only slews and would take hours to converge from a 9-year offset). The helper is called by each TLS consumer (`S80dockercompose start`, `ota-check`) rather than from a generic init script, so boot stays non-blocking if NTP is unreachable. The system `ntpd` (`S49ntp`) keeps the clock disciplined for the rest of uptime.
 
 ## 6. Risks, Assumptions & Dependencies
 
@@ -554,7 +554,7 @@ The corollary is simple: **if your change must reach already-deployed devices wi
 |---|---|---|
 | Default config file (every device gets this baseline) | `board/linxdot/overlay/<path>` | Replaced on every OTA — your default ships in the new rootfs. |
 | Operator-customizable config | Document a `/data/<...>` override + a bind-mount or symlink in the init script (see `S01mountall`'s `/data/docker-compose.yml` pattern) | Operator's override survives OTA; firmware default is always the latest from the rootfs. |
-| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S45clock` → `S50sshd` → `S60dockerd` → `S80dockercompose` → `S98confirm` → `S99otacheck`). |
+| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S49ntp` → `S50sshd` → `S60dockerd` → `S80dockercompose` → `S98confirm` → `S99otacheck`). |
 | New userspace tool / agent | `board/linxdot/overlay/usr/sbin/<name>`, or a Buildroot package under `package/<name>/` | Replaced on every OTA. |
 | Persistent application state | `/data/<your-app>/` — write at runtime, document the path | Survives OTA. **Never use `/var`, `/etc`, `/root`, `/home` as a "persistent" location** — see § 9.3. |
 | New kernel module (Phase 1–4) | Add prebuilt under `board/linxdot/modules/<kernel-version>/` (LFS-tracked) | Replaced on every OTA via `post-build.sh`. Add the file to the CI base-hash (§ 9.6). |

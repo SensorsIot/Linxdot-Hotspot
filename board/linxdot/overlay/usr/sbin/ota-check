@@ -22,6 +22,11 @@ if [ "$UPGRADE_AVAILABLE" = "1" ]; then
     die "current slot not committed (upgrade_available=1) — wait for S98confirm"
 fi
 
+# Step the wall-clock if stale before any HTTPS — the LD1001 has no
+# battery RTC, and curl will otherwise fail "cert not yet valid".
+# Idempotent and a fast no-op if the clock is already sane.
+/usr/sbin/clock-bootstrap || log "warning: clock-bootstrap failed; HTTPS may fail cert validation"
+
 CURRENT_SLOT=$(fw_printenv -n boot_slot 2>/dev/null || echo "A")
 if [ "$CURRENT_SLOT" = "A" ]; then TARGET_SLOT=B; else TARGET_SLOT=A; fi
 

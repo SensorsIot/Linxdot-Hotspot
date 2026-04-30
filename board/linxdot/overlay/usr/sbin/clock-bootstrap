@@ -1,0 +1,54 @@
+#!/bin/sh
+# /usr/sbin/clock-bootstrap — step the wall-clock from NTP if stale.
+#
+# Idempotent: returns 0 immediately if year >= 2024. Otherwise tries
+# `ntpd -gq <server>` against a list of public NTP servers, with a
+# per-server watchdog so an unreachable server can't stall the caller
+# (ntpd -gq alone can hang for minutes against a black-holed host).
+#
+# Why on-demand (not in init): the LD1001 has no battery-backed RTC,
+# so the kernel clock resets on every power loss (observed:
+# 2017-08-05). TLS server-cert validation then fails "cert not yet
+# valid" until something steps the clock. We call this helper from the
+# consumers that actually need TLS — `ota-check` (HTTPS to GitHub) and
+# `S80dockercompose start` (basicstation's WSS to TTN) — rather than
+# blocking boot on an unconditional NTP round-trip.
+
+NTP_SERVERS="pool.ntp.org time.cloudflare.com time.google.com"
+WATCHDOG_SEC=30
+
+year=$(date -u +%Y)
+if [ "$year" -ge 2024 ]; then
+    exit 0
+fi
+
+ntp_step() {
+    # `ntpd -gq <server>`: -g lets the first adjust exceed the panic
+    # threshold, -q quits as soon as the clock is set. Servers go as
+    # positional args (the -p flag is the pidfile, not a server list).
+    server=$1
+    log=/tmp/.clock-bootstrap.$$
+    /usr/sbin/ntpd -gq "$server" >"$log" 2>&1 &
+    ntp_pid=$!
+    ( sleep "$WATCHDOG_SEC"; kill -TERM "$ntp_pid" 2>/dev/null ) &
+    wd_pid=$!
+    wait "$ntp_pid" 2>/dev/null
+    kill "$wd_pid" 2>/dev/null
+    wait "$wd_pid" 2>/dev/null
+    if [ -s "$log" ]; then
+        logger -t clock-bootstrap < "$log"
+    fi
+    rm -f "$log"
+}
+
+for server in $NTP_SERVERS; do
+    ntp_step "$server"
+    year=$(date -u +%Y)
+    if [ "$year" -ge 2024 ]; then
+        logger -t clock-bootstrap "stepped via ${server}: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        exit 0
+    fi
+done
+
+logger -t clock-bootstrap "warning: NTP step failed; clock left at $(date -u)"
+exit 1
