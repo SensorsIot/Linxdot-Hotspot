@@ -44,12 +44,27 @@ sudo rkdeveloptool rd                            # reboot into new firmware
 
 Connect Ethernet and wait ~2 minutes for first boot.
 
-### 3. Boot the gateway and read its EUI
+### 3. Find the device and bind the case MAC (one-time)
 
-The Gateway EUI is burned into the SX1302 concentrator chip and printed by Basics Station at startup. To see it, bootstrap the container with a placeholder key (you'll replace it with the real one in step 6):
+After the first boot, the device announces itself on Ethernet with a known shared setup MAC: **`02:00:5d:01:01:01`**. Look for that entry in your router's DHCP table to get the device's IP, then SSH in and run the setup wizard:
 
 ```bash
-ssh root@<device-ip>                                       # password: linxdot
+ssh root@<device-ip>     # password: linxdot
+linxdot-setup            # interactive — paste the MAC from the case sticker
+```
+
+The wizard prompts for the MAC printed on the case sticker (your unit's globally-unique IEEE-allocated identity), validates the format, writes it into the eMMC hardware boot partition, and offers to reboot. **Accept the reboot.** After the device comes back, re-discover it in your router's lease table — this time look for your case MAC, not `02:00:5d:01:01:01`. The case MAC then survives every OTA update and any future `rkdeveloptool` re-flash. **You only do this once per device.**
+
+> ⚠️ **Provision one device at a time.** Because every fresh OpenLinxdot device announces the same setup MAC `02:00:5d:01:01:01`, two simultaneously-fresh devices on one LAN will collide on DHCP. Finish this step on the first device before powering on the next.
+
+If you skip the wizard the device will keep using the shared setup MAC. That's harmless — TTN identifies your gateway by its EUI, not its MAC — but you lose the unique identity printed on the case.
+
+### 4. Read the Gateway EUI
+
+SSH back in at the new (case-MAC) IP. The Gateway EUI is burned into the SX1302 concentrator chip and printed by Basics Station at startup. To see it, bootstrap the container with a placeholder key (you'll replace it with the real one in step 6):
+
+```bash
+ssh root@<new-device-ip>                                   # password: linxdot
 echo placeholder > /data/basicstation/tc_key.txt
 /etc/init.d/S80dockercompose start
 sleep 10
@@ -57,26 +72,13 @@ docker logs basicstation 2>&1 | grep "Gateway EUI:"
 # → Gateway EUI:   0016C001F140B34D
 ```
 
-### 4. Bind the case MAC (one-time)
-
-A freshly-flashed device boots with a known shared setup MAC: **`02:00:5d:01:01:01`**. Find that entry in your router's DHCP table to get the device's IP, then SSH in and run the setup wizard:
-
-```bash
-ssh root@<device-ip>     # password: linxdot
-linxdot-setup            # interactive — pastes the MAC from the sticker
-```
-
-The wizard prompts for the MAC printed on the case sticker (your unit's globally-unique IEEE-allocated identity), validates the format, writes it into the eMMC hardware boot partition, and offers to reboot. After the reboot the device gets a fresh DHCP lease at the new MAC — re-discover via your router's lease table. The MAC then survives every OTA update and any future `rkdeveloptool` re-flash. **You only do this once per device.**
-
-> ⚠️ **Provision one device at a time.** Because every fresh OpenLinxdot device announces the same setup MAC `02:00:5d:01:01:01`, two simultaneously-fresh devices on one LAN will collide on DHCP. Finish step 4 on the first device before powering on the next.
-
-Skipping this step is harmless — TTN identifies your gateway by its EUI, not its MAC — but the device will keep using the shared setup MAC instead of the unique one printed on the case.
+Write the EUI down — you'll paste it into TTN Console in the next step.
 
 ### 5. Register on TTN and get an LNS key
 
 On [TTN Console](https://console.cloud.thethings.network):
 
-1. **Gateways → Register gateway**. Enter the Gateway EUI from step 3, pick your frequency plan (e.g. `Europe 863-870 MHz`), register.
+1. **Gateways → Register gateway**. Enter the Gateway EUI from step 4, pick your frequency plan (e.g. `Europe 863-870 MHz`), register.
 2. Open the gateway's **API keys → Add API key**. Tick **Link as Gateway to a Gateway Server for traffic exchange** under *Gateway connection (also LNS Key)*. Create, copy the `NNSXS.…` value — TTN shows it once.
 
 ### 6. Install the real key
