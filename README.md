@@ -137,6 +137,7 @@ If a newer version is available it'll download, verify, install, and reboot — 
 | Can't enter Loader mode | Make sure the cable supports data (not charge-only). Try a longer button hold (up to 10 s). |
 | No network after boot | Connect Ethernet **before** powering on; check router DHCP leases. |
 | `TC_KEY: NOT CONFIGURED` | Step 4 didn't complete — re-run `linxdot-setup` to retry TTN registration. |
+| `ota-check` fails with `SSL certificate problem: certificate is not yet valid` | Stale kernel clock (LD1001 has no battery RTC). One-time fix on pre-v1.0.5 devices: `killall ntpd; /usr/sbin/ntpd -gq pool.ntp.org; /etc/init.d/S49ntp start; ota-check`. After upgrading to v1.0.5+ the clock is stepped automatically at every boot. |
 | `EUI Source: eth0` instead of `chip` | Concentrator not reset. Power-cycle the device, or run `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start`. |
 | Gateway not showing on TTN | Verify EUI matches registration; `docker logs basicstation` for connection errors. |
 | Repeated `excessive clock drifts (... ppm, threshold 100ppm)` | SX1302 reference oscillator drift. Cosmetic for the LNS link, but degrades RX timing on class-B/C — log a hardware issue if persistent. |
