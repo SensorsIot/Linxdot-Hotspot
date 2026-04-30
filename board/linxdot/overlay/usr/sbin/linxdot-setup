@@ -239,48 +239,80 @@ cluster_freqplan_default() {
 }
 
 resolve_gateway_conflict() {
-    # Called after POST gateway returns 409. Outcomes:
-    #   1. Our gateway_id exists with matching EUI  → silently reuse $gid.
-    #   2. Our gateway_id exists with different EUI → hard error.
-    #   3. Our gateway_id is free → 409 was due to EUI clash with an
-    #      unknown gateway_id elsewhere → ask operator to paste an LNS
-    #      key for the EXISTING (unknown) gateway, OR delete it and retry.
-    #   4. GET 403 → bootstrap key lacks RIGHT_GATEWAY_INFO → hard error.
-    echo "  conflict — investigating…" >&2
+    # Called after POST gateway returns 409. TTN's error body includes
+    # `details[].attributes.gateway_id` naming the existing gateway, so
+    # we extract that directly instead of scanning. Outcomes:
+    #   1. Existing gateway has our EUI and we own it → silently reuse,
+    #      adopting the existing gateway_id (which may differ from the
+    #      one the operator typed if 409 was eui_taken vs id_taken).
+    #   2. Existing gateway has a different EUI than ours → unexpected
+    #      (TTN attribute should match) → hard error.
+    #   3. We can't access the existing gateway (403) → it belongs to
+    #      another tenant. Show the operator the existing gid + admin
+    #      contact and let them paste an LNS key for it.
+    #   4. Existing gateway disappeared between POST and GET (404) →
+    #      transient, ask the operator to retry.
     msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+    existing_gid=$(printf '%s' "$TTN_RESPONSE" | json_str gateway_id)
+    contact=$(printf '%s' "$TTN_RESPONSE" | json_str administrative_contact)
+    [ -z "$existing_gid" ] && existing_gid=$gid   # fallback if TTN omits it
+
+    echo "  conflict — TTN reports existing gateway '$existing_gid'." >&2
+    [ -n "$contact" ] && [ "$contact" != "$owner" ] && echo "  admin contact: $contact" >&2
     [ -n "$msg" ] && echo "  TTN says: $msg" >&2
 
-    ttn_request GET "/api/v3/gateways/${gid}?field_mask=ids,name"
+    ttn_request GET "/api/v3/gateways/${existing_gid}?field_mask=ids,name"
     case "$HTTP_STATUS" in
         200)
             existing_eui=$(printf '%s' "$TTN_RESPONSE" | json_str eui)
             existing_eui_uc=$(printf '%s' "$existing_eui" | tr 'a-f' 'A-F')
             if [ "$existing_eui_uc" = "$eui" ]; then
-                echo "  Gateway '$gid' already registered with this device's EUI — reusing it." >&2
+                if [ "$existing_gid" != "$gid" ]; then
+                    echo "  Adopting existing gateway_id '$existing_gid' (you typed '$gid')." >&2
+                else
+                    echo "  Reusing existing gateway '$existing_gid' (same EUI as this device)." >&2
+                fi
+                gid=$existing_gid
                 return 0
             fi
             cat >&2 <<EOF
-  Gateway '$gid' exists on TTN but is bound to a DIFFERENT EUI:
-        existing: $existing_eui
-        ours:     $eui
-  This gateway_id belongs to a different physical device. Re-run
-  linxdot-setup and pick a different gateway_id.
+  TTN flagged '$existing_gid' as the conflicting gateway, but a
+  follow-up GET shows it has EUI $existing_eui (not $eui). This is
+  unexpected. Re-run linxdot-setup with a different gateway_id, or
+  open an issue against linxdot-setup.
 EOF
             exit 1
             ;;
         403)
             cat >&2 <<EOF
-  Gateway '$gid' exists on TTN but the API key cannot read it
-  (HTTP 403). Either pick a different gateway_id, or grant the
-  bootstrap key broader gateway rights.
+
+  This LoRaWAN EUI is registered on TTN as gateway:
+
+      $existing_gid${contact:+
+      admin contact: $contact}
+
+  Your bootstrap API key cannot manage that gateway (HTTP 403),
+  so the wizard cannot create an LNS key for it via REST.
+
+  Options:
+    A) If YOU own that registration under a different tenant or
+       organization, switch to that owner's API key and re-run
+       linxdot-setup.
+    B) Paste an existing LNS key for that gateway. To make one,
+       open the gateway page in TTN Console (you'll need access)
+       and add a key with "Link as Gateway" right.
+
 EOF
-            exit 1
+            gid=$existing_gid   # so the success summary names the real gid
+            prompt_for_lns_key "blank to abort"
             ;;
         404)
-            # Our gid is free; the 409 was an EUI clash under some other
-            # gid we don't know. Operator must find the existing gateway
-            # in TTN Console (or delete it).
-            ask_lns_for_unknown_gateway
+            cat >&2 <<EOF
+  TTN reported '$existing_gid' as the conflicting gateway, but a
+  follow-up GET shows it doesn't exist. Likely a transient state.
+  Re-run linxdot-setup in a moment.
+EOF
+            exit 1
             ;;
         *)
             echo "  Unexpected lookup status: HTTP $HTTP_STATUS" >&2
@@ -309,34 +341,6 @@ prompt_for_lns_key() {
             *) echo "  bad format — must start with 'NNSXS.'" >&2 ;;
         esac
     done
-}
-
-ask_lns_for_unknown_gateway() {
-    # The EUI is already registered under a gateway_id we don't know.
-    # We can't construct a direct URL, so the operator has to find it.
-    cat >&2 <<EOF
-
-  This LoRaWAN EUI ($eui) is already registered on TTN under some
-  OTHER gateway_id — not '$gid'. The wizard doesn't know which
-  one without scanning your gateway list.
-
-  Two ways forward:
-
-    A) Delete the existing gateway in TTN Console — find the row
-       with EUI $eui, open it, ⋮ menu -> Delete. Then re-run
-       linxdot-setup. Cleanest if you don't need that registration.
-
-    B) Keep the existing gateway and paste an LNS key for it:
-         1. In TTN Console, open the gateway with EUI $eui.
-         2. API keys tab -> "+ Add API key".
-         3. Tick "Link as Gateway to a Gateway Server for traffic
-            exchange". Create.
-         4. Copy the NNSXS.… (shown once) and paste below.
-       (If that EUI isn't in your gateway list, it's registered
-       under another account — ask the owner.)
-
-EOF
-    prompt_for_lns_key "or blank to abort"
 }
 
 ask_lns_for_known_gateway() {
