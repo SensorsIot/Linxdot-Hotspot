@@ -95,15 +95,15 @@ The LNS key lives on `/data` and survives reboots and OTA updates. The admin API
 
 ### 5. Change region (optional)
 
-If you picked a non-`eu1` cluster in step 4, the wizard already wrote `/data/docker-compose.yml` with the right `TTS_REGION` for you. To change cluster after setup:
+The wizard records your cluster choice in `/data/basicstation/region.env` (a single `TTS_REGION=…` line). To change cluster after setup:
 
 ```bash
 ssh root@<device-ip>
-vi /data/docker-compose.yml                           # TTS_REGION: eu1 | nam1 | au1 | as1
+echo TTS_REGION=nam1 > /data/basicstation/region.env   # eu1 | nam1 | au1 | as1
 /etc/init.d/S80dockercompose restart
 ```
 
-The `/data` override is bind-mounted on top of `/etc/docker-compose.yml` at boot, so it survives OTA updates.
+The rootfs `docker-compose.yml` reads `${TTS_REGION:-eu1}`, so the env file overrides the default. It lives on `/data` and survives OTA updates.
 
 ---
 
@@ -184,7 +184,7 @@ Run on the device after `ssh root@<device-ip>`:
 | `ota-check` | Trigger an OTA check now. Installs + reboots if a newer release is on GitHub. |
 | `cat /etc/os-release \| grep VERSION_ID` | Show the running firmware version. |
 | `fw_printenv boot_slot bootcount upgrade_available` | For OTA debugging: A/B slot, consecutive boot attempts (non-zero = trial slot failing health checks), and the trial-boot flag. |
-| `/etc/init.d/S80dockercompose restart` | Restart basicstation (after editing `/data/docker-compose.yml`, etc.). |
+| `/etc/init.d/S80dockercompose restart` | Restart basicstation (after editing `/data/basicstation/region.env`, etc.). |
 | `linxdot-setup` | Re-run the setup wizard. After setup is complete it prints status only; `rm /data/.setup-state` first to actually re-provision. |
 
 ## For developers

@@ -7,19 +7,11 @@ SYS_CONF=/etc/docker-compose.yml
 USER_CONF=/data/docker-compose.yml
 PROG=/usr/bin/docker-compose
 LOG=/var/log/docker-compose.log
-RESET_SCRIPT=/data/basicstation/reset.sh
+RESET_SCRIPT=/opt/basicstation/reset.sh
 TC_KEY_FILE=/data/basicstation/tc_key.txt
+REGION_FILE=/data/basicstation/region.env
 
 [ -x "$PROG" ] || exit 0
-
-# Use user config if present, otherwise system config
-if [ -f "$USER_CONF" ]; then
-    CONF="$USER_CONF"
-else
-    CONF="$SYS_CONF"
-fi
-
-[ -s "$CONF" ] || exit 0
 
 # Read TC_KEY from file (skip comment lines)
 load_tc_key() {
@@ -31,6 +23,44 @@ load_tc_key() {
         fi
     fi
     return 1
+}
+
+# Read TTS_REGION from /data/basicstation/region.env if present (default: eu1
+# applied via ${TTS_REGION:-eu1} in /etc/docker-compose.yml).
+load_region() {
+    if [ -f "$REGION_FILE" ]; then
+        # shellcheck source=/dev/null
+        . "$REGION_FILE"
+        [ -n "$TTS_REGION" ] && export TTS_REGION
+    fi
+}
+
+# Pre-v1.0.7 the wizard wrote /data/docker-compose.yml as a full copy of the
+# rootfs compose with TTS_REGION substituted. Two problems with that on v1.0.7+:
+# the /data copy carries STATION_RADIOINIT (which the new rootfs intentionally
+# drops to fix the SX1250 reset race), and it freezes any future compose-file
+# change. Extract any region the operator picked into region.env and archive
+# the override.
+migrate_region_override() {
+    [ -f "$USER_CONF" ] || return 0
+    # Skip if the override already uses the v1.0.7 env-interpolation form.
+    grep -q 'TTS_REGION:.*\${' "$USER_CONF" && return 0
+    region=$(sed -n 's/.*TTS_REGION:[[:space:]]*"\{0,1\}\([a-z0-9]*\).*/\1/p' "$USER_CONF" | head -1)
+    if [ -n "$region" ] && [ ! -f "$REGION_FILE" ]; then
+        echo "S80dockercompose: migrating $USER_CONF → $REGION_FILE (region=$region)"
+        echo "TTS_REGION=$region" > "$REGION_FILE"
+    fi
+    mv "$USER_CONF" "${USER_CONF}.pre-v1.0.7.bak"
+}
+
+# Pick config file (after migration may have removed an obsolete override).
+select_conf() {
+    if [ -f "$USER_CONF" ]; then
+        CONF="$USER_CONF"
+    else
+        CONF="$SYS_CONF"
+    fi
+    [ -s "$CONF" ]
 }
 
 wait_for_docker() {
@@ -54,12 +84,16 @@ reset_concentrator() {
 
 case "$1" in
     start)
+        migrate_region_override
+        select_conf || exit 0
+
         # Load TC_KEY from config file
         if ! load_tc_key; then
             echo "S80dockercompose: TC_KEY not configured in $TC_KEY_FILE"
             echo "S80dockercompose: Edit the file and add your TTN API key to connect"
             exit 0
         fi
+        load_region
 
         echo "S80dockercompose: waiting for Docker"
         wait_for_docker || exit 1
@@ -73,6 +107,7 @@ case "$1" in
         $PROG -f "$CONF" up -d >> "$LOG" 2>&1
         ;;
     stop)
+        select_conf || exit 0
         echo "S80dockercompose: stopping containers"
         $PROG -f "$CONF" stop >> "$LOG" 2>&1
         ;;

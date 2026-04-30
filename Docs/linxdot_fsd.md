@@ -236,7 +236,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **FR-1.2** [Must]: The system shall read the LoRaWAN gateway EUI from the SX1302 concentrator chip (not from `eth0`).
 - **FR-1.3** [Must]: The system shall connect to a TTN cluster via WebSocket+TLS using the Basics Station LNS protocol.
 - **FR-1.4** [Must]: The system shall use the TC (Thing Configuration) key from `/data/basicstation/tc_key.txt` to authenticate with TTN.
-- **FR-1.5** [Should]: The system shall support at minimum the TTN regions `eu1`, `nam1`, `au1` by changing `TTS_REGION` in `/data/docker-compose.yml`.
+- **FR-1.5** [Should]: The system shall support at minimum the TTN regions `eu1`, `nam1`, `au1` by setting `TTS_REGION` in `/data/basicstation/region.env` (interpolated into the rootfs `docker-compose.yml`).
 
 #### Provisioning & configuration
 - **FR-2.1** [Must]: On first boot the system shall create `/data/basicstation/tc_key.txt` as a placeholder template until the operator populates it.
@@ -472,7 +472,7 @@ The admin API key needs the **Manage gateways** right (or at minimum `RIGHT_USER
 3. `GET /api/v3/<owner_path>/gateways?field_mask=ids&limit=1000` to find any gateway already registered with the device's EUI under the same owner. If a match is found, the wizard skips the gateway-name + frequency-plan prompts and adopts that `gateway_id`. The list call also doubles as the owner-validation step (404 → typo, 401/403 → missing list right).
 4. If no match: `POST /api/v3/users/<owner>/gateways` (or `/organizations/<owner>/gateways`) registers the gateway with the prompted name, EUI, frequency plan, and `enforce_duty_cycle=true`. On 409 (cross-tenant — owner couldn't list it but TTN has it) the wizard parses TTN's `details[].attributes.gateway_id` to find the existing gateway, GETs it, and either silently reuses or falls back to a manual LNS-key paste with a direct console URL.
 5. `POST /api/v3/gateways/<gid>/api-keys` with `RIGHT_GATEWAY_LINK` to mint a fresh LNS key, extracts the `NNSXS.…` value from the response.
-6. For non-`eu1` clusters, copies `/etc/docker-compose.yml` to `/data/docker-compose.yml` and rewrites `TTS_REGION` to match the chosen cluster.
+6. Writes `TTS_REGION=<cluster>` to `/data/basicstation/region.env`. The rootfs `docker-compose.yml` resolves `${TTS_REGION:-eu1}` from this env file (loaded by `S80dockercompose`), so the operator's region choice rides through OTA without freezing a whole compose-file snapshot on `/data`.
 7. Writes the LNS key to `/data/basicstation/tc_key.txt` (mode 600), restarts basicstation via `S80dockercompose restart`, polls Docker logs for `Connected to MUXS` (timeout 60 s). The handshake step also loops on failure — the operator can fix clock / region / firewall in another shell and press Enter to retry.
 8. Writes `setup-complete` to `/data/.setup-state`. Re-running the wizard at this point prints status only (TC key present, basicstation running, TTN connected) without re-prompting.
 
@@ -484,7 +484,7 @@ Caveat for retests: TTN community cluster only allows users to soft-delete gatew
 
 Single-slot Phase 1 devices **cannot** receive OTA. One-time reflash required:
 
-1. `ssh root@<device>` and back up `/data/basicstation/tc_key.txt` (and any custom `/data/docker-compose.yml`).
+1. `ssh root@<device>` and back up `/data/basicstation/tc_key.txt` (and `/data/basicstation/region.env` if present).
 2. Follow § 8.3 with the first A/B-layout release image.
 3. Re-populate `/data/basicstation/tc_key.txt` with the saved key.
 4. All subsequent updates arrive via OTA — no further case-opens.
@@ -518,9 +518,11 @@ Same logic as boot-time `S99otacheck` — no reboot required. Refuses to run if 
 
 ```
 ssh root@<device>
-vi /data/docker-compose.yml       # change TTS_REGION: eu1 / nam1 / au1
+echo TTS_REGION=nam1 > /data/basicstation/region.env   # eu1 / nam1 / au1 / as1
 /etc/init.d/S80dockercompose restart
 ```
+
+A pre-v1.0.7 device with `/data/docker-compose.yml` still in place is migrated automatically on the first v1.0.7 boot: `S80dockercompose.migrate_region_override` extracts `TTS_REGION`, writes `region.env`, and renames the override to `/data/docker-compose.yml.pre-v1.0.7.bak`. This also clears the pre-v1.0.7 `STATION_RADIOINIT` setting that races against `S80dockercompose`'s host-side reset and intermittently leaves the SX1302 in reset (`Failed to set SX1250_0 in STANDBY_RC mode` on basicstation startup).
 
 ### 8.8 Recovery procedures
 

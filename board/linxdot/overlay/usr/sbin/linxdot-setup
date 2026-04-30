@@ -741,13 +741,12 @@ EOF
     fi
 
     # ---- Configure cluster on basicstation -----------------------------
-    if [ "$TTN_CLUSTER" != "eu1" ]; then
-        echo "Configuring basicstation for cluster $TTN_CLUSTER…" >&2
-        if [ ! -f /data/docker-compose.yml ]; then
-            cp /etc/docker-compose.yml /data/docker-compose.yml
-        fi
-        sed -i "s|TTS_REGION:.*|TTS_REGION: ${TTN_CLUSTER}|" /data/docker-compose.yml
-    fi
+    # Persist the operator's region choice as a tiny env file. The rootfs
+    # docker-compose.yml interpolates ${TTS_REGION:-eu1}, so this single
+    # value survives OTA without freezing a whole compose-file snapshot
+    # on /data.
+    echo "Configuring basicstation for cluster $TTN_CLUSTER…" >&2
+    echo "TTS_REGION=$TTN_CLUSTER" > /data/basicstation/region.env
 
     # ---- Install LNS key + restart + verify ----------------------------
     printf '%s\n' "$lns_key" > "$TC_KEY"

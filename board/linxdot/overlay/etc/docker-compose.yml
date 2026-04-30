@@ -11,8 +11,7 @@ services:
       DEVICE: /dev/spidev0.0
       RESET_GPIO: 0
       GATEWAY_EUI_SOURCE: chip
-      TTS_REGION: eu1
+      TTS_REGION: "${TTS_REGION:-eu1}"
       TC_KEY: "${TC_KEY}"
-      STATION_RADIOINIT: /config/reset.sh
     volumes:
       - /data/basicstation:/config

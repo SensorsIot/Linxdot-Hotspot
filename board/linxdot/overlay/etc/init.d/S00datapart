@@ -65,12 +65,6 @@ case "$1" in
             mkdir -p /data/basicstation
             mkdir -p /data/etc
 
-            # Copy Basics Station config files
-            if [ -f /opt/basicstation/reset.sh ]; then
-                cp /opt/basicstation/reset.sh /data/basicstation/
-                chmod +x /data/basicstation/reset.sh
-            fi
-
             # Create TC_KEY template for user to fill in
             if [ ! -f /data/basicstation/tc_key.txt ]; then
                 cat > /data/basicstation/tc_key.txt << 'KEYEOF'
@@ -89,6 +83,14 @@ KEYEOF
             touch /data/.initialized
             sync
         fi
+
+        # Migration: pre-v1.0.7 images copied reset.sh to /data and basicstation
+        # invoked it via STATION_RADIOINIT — but that double-reset (host + container)
+        # races the SX1250 PLL/TCXO settle and intermittently leaves the chip in
+        # reset on basicstation startup. v1.0.7 drops STATION_RADIOINIT and runs
+        # the rootfs reset.sh once, host-side, from S80dockercompose. The /data
+        # copy is no longer used by anything; remove it for clarity.
+        rm -f /data/basicstation/reset.sh
         ;;
     stop)
         ;;
