@@ -46,7 +46,7 @@ Connect Ethernet and wait ~2 minutes for first boot.
 
 ### 3. Boot the gateway and read its EUI
 
-The Gateway EUI is burned into the SX1302 concentrator chip and printed by Basics Station at startup. To see it, bootstrap the container with a placeholder key (you'll replace it with the real one in step 5):
+The Gateway EUI is burned into the SX1302 concentrator chip and printed by Basics Station at startup. To see it, bootstrap the container with a placeholder key (you'll replace it with the real one in step 6):
 
 ```bash
 ssh root@<device-ip>                                       # password: linxdot
@@ -57,14 +57,28 @@ docker logs basicstation 2>&1 | grep "Gateway EUI:"
 # → Gateway EUI:   0016C001F140B34D
 ```
 
-### 4. Register on TTN and get an LNS key
+### 4. Bind the case MAC (one-time)
+
+The MAC printed on the case sticker is your unit's globally-unique IEEE-allocated identity. Tell the gateway to use it on `eth0`:
+
+```bash
+ssh root@<device-ip>
+set-eth-mac aa:bb:cc:dd:ee:ff   # the MAC from the sticker
+exit
+```
+
+Setting the MAC bounces `eth0`, so the device gets a fresh DHCP lease (usually a new IP — re-discover via your router's lease table). The MAC lives in the eMMC's hardware boot partition (outside the GPT), so it survives every OTA update and any future `rkdeveloptool` re-flash. **You only do this once per device.**
+
+If you skip this step the gateway picks a deterministic locally-administered MAC derived from the eMMC chip ID. That's harmless — TTN identifies your gateway by its EUI, not its MAC — but you lose the globally-unique identity printed on the case.
+
+### 5. Register on TTN and get an LNS key
 
 On [TTN Console](https://console.cloud.thethings.network):
 
 1. **Gateways → Register gateway**. Enter the Gateway EUI from step 3, pick your frequency plan (e.g. `Europe 863-870 MHz`), register.
 2. Open the gateway's **API keys → Add API key**. Tick **Link as Gateway to a Gateway Server for traffic exchange** under *Gateway connection (also LNS Key)*. Create, copy the `NNSXS.…` value — TTN shows it once.
 
-### 5. Install the real key
+### 6. Install the real key
 
 ```bash
 echo 'NNSXS.your-real-key-here...' > /data/basicstation/tc_key.txt
@@ -77,7 +91,7 @@ docker logs basicstation 2>&1 | grep -i "Connected to MUXS"
 
 On TTN Console your gateway should show **Connected**. The key lives on `/data` and survives reboots and OTA updates — you only do this once per device.
 
-### 6. Change region (optional)
+### 7. Change region (optional)
 
 Default is `eu1` (Europe). To switch to another TTN cluster, drop a `/data` override of the compose file (this also makes your customization OTA-safe — runtime edits to `/etc/docker-compose.yml` stack on the overlayfs and can mask future firmware fixes):
 
@@ -124,7 +138,7 @@ If a newer version is available it'll download, verify, install, and reboot — 
 |---|---|
 | Can't enter Loader mode | Make sure the cable supports data (not charge-only). Try a longer button hold (up to 10 s). |
 | No network after boot | Connect Ethernet **before** powering on; check router DHCP leases. |
-| `TC_KEY: NOT CONFIGURED` | Step 5 not done — add the API key to `tc_key.txt` and restart compose. |
+| `TC_KEY: NOT CONFIGURED` | Step 6 not done — add the API key to `tc_key.txt` and restart compose. |
 | `EUI Source: eth0` instead of `chip` | Concentrator not reset. Power-cycle the device, or run `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start`. |
 | Gateway not showing on TTN | Verify EUI matches registration; `docker logs basicstation` for connection errors. |
 | Repeated `excessive clock drifts (... ppm, threshold 100ppm)` | SX1302 reference oscillator drift. Cosmetic for the LNS link, but degrades RX timing on class-B/C — log a hardware issue if persistent. |

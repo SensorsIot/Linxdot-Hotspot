@@ -240,7 +240,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 #### Provisioning & configuration
 - **FR-2.1** [Must]: On first boot the system shall create `/data/basicstation/tc_key.txt` as a placeholder template until the operator populates it.
-- **FR-2.2** [Must]: The system shall derive a stable Ethernet MAC address from the eMMC CID so DHCP leases survive reflashes.
+- **FR-2.2** [Must]: The system shall determine `eth0`'s MAC by trying, in priority order: (1) a per-unit record at sector 0 of `/dev/mmcblk1boot0` (typically the device's case-printed MAC, written once via `set-eth-mac` — see § 8.3 *After first boot*); (2) an admin override at `/data/eth0_mac`; (3) a deterministic locally-administered MAC derived from the eMMC CID. The boot0 record lives in the eMMC's hardware boot partition, outside the GPT, so it survives both OTA updates and `rkdeveloptool wl 0 image.img` factory re-flashes.
 - **FR-2.3** [Must]: The system shall obtain an IPv4 address via DHCP on `eth0`.
 - **FR-2.4** [Should]: The system shall synchronise time via NTP before TLS connections are attempted.
 
@@ -365,6 +365,16 @@ VERSION_ID=<VERSION>
 ```
 `VERSION` is set to `${GITHUB_REF_NAME#v}` by CI (e.g. `1.2.3` for tag `v1.2.3`), or `dev` for local builds.
 
+**`/dev/mmcblk1boot0` — per-unit MAC record** (sector 0, 32 bytes, written by `set-eth-mac`):
+
+| Offset | Size | Field    | Contents                                          |
+|--------|------|----------|---------------------------------------------------|
+| 0      | 8    | magic    | ASCII `"OLNXMAC1"` (`4f 4c 4e 58 4d 41 43 31`)    |
+| 8      | 6    | mac      | Raw MAC bytes; byte 0 must have unicast bit clear |
+| 14     | 18   | reserved | Zero (room for future fields, e.g. CRC)           |
+
+`S40network` accepts the record only if the magic matches exactly, the MAC is neither all-zero nor all-FF, and byte 0 is unicast — otherwise it falls through to the next tier of FR-2.2. The eMMC's hardware boot partition lives outside the GPT, so this record is preserved across SWUpdate (which only writes the partitions in `sw-description`) and across `rkdeveloptool wl 0 image.img` factory re-flashes (which write the user data area, not the HW boot partitions). Operators run `set-eth-mac` once per device, typically with the MAC printed on the case sticker (see § 8.3 *After first boot*).
+
 ## 8. Operational Procedures
 
 ### 8.1 Build
@@ -404,6 +414,17 @@ Option B — remote (if a USB cable is routed to a host running `rkdeveloptool`,
 3. Host sees the device; `rkdeveloptool ld` confirms; proceed with `wl 0 ...`.
 
 This avoids repeat case-opens for Phase 3 → Phase 4 upgrade flashing.
+
+**After first boot — bind the case MAC** (one-time per device):
+
+```
+ssh root@<device-ip>
+set-eth-mac aa:bb:cc:dd:ee:ff   # the MAC printed on the case sticker
+```
+
+This writes a 32-byte record to sector 0 of `/dev/mmcblk1boot0` (format in § 7.3). On every subsequent boot `S40network` reads it and assigns the case MAC to `eth0` before DHCP starts. The eMMC's hardware boot partition lives outside the GPT, so the record survives both OTA updates and any future `rkdeveloptool` re-flash — set it once, never again. The MAC printed on each device's case is from FX Technology's IEEE-allocated MA-M block (OUI prefix `0c:86:29:e0:_:_`/`0c:86:29:e1:_:_` etc.) and is the unit's globally-unique identity. Skipping this step is harmless for TTN traffic (the gateway EUI is what matters, FR-1.2) but loses that identity — `eth0` falls back to a deterministic but locally-administered MAC derived from the eMMC CID.
+
+Caveat: changing `eth0`'s MAC bounces the interface, so the device's DHCP lease is renewed (likely a new IP). Re-discover via the router's DHCP table.
 
 ### 8.4 Migration from pre-A/B (Phase 1 → Phase 3+)
 
