@@ -324,6 +324,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 | Interface | Direction | Protocol | Endpoint |
 |---|---|---|---|
 | TTN LNS | Outbound | Basics Station over WebSocket+TLS | `wss://<cluster>.cloud.thethings.network` |
+| TTN Identity Server (provisioning, used by `linxdot-setup`) | Outbound | HTTPS REST + Bearer auth | `https://<cluster>.cloud.thethings.network/api/v3/{auth_info,users/<u>/gateways,gateways/<id>/api-keys}` |
 | OTA manifest poll | Outbound | HTTPS GET | `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` |
 | OTA bundle download | Outbound | HTTPS GET | URL from manifest `url` field |
 | SSH | Inbound | SSH (Dropbear) | TCP 22 |
@@ -441,6 +442,41 @@ Caveats:
 - Because the setup-fallback MAC is the same on every fresh device, **only provision one device at a time** on a given LAN — two simultaneously fresh devices will collide on DHCP. Bind the case MAC of the first before plugging in the next.
 
 The non-interactive equivalent (for scripted provisioning) is `set-eth-mac aa:bb:cc:dd:ee:ff`, which the wizard wraps.
+
+**After the case-MAC reboot — register on TTN** (Phase B, one-time per device):
+
+After Phase A reboots the device, find it again in the router's DHCP table under the case MAC, SSH back in, and re-run the wizard. It detects `state=mac-bound` from `/data/.setup-state` and runs Phase B:
+
+```
+ssh root@<new-device-ip>
+linxdot-setup
+```
+
+Phase B drives a REST conversation with the chosen TTN cluster's identity server. Inputs:
+
+| Prompt | Default |
+|---|---|
+| Cluster | `eu1` (or `nam1` / `au1` / `as1`) |
+| User / org ID | the operator's TTN handle |
+| User or organization | `u` (most common) |
+| Admin API key (`NNSXS.…`) | none — operator pastes this |
+| Gateway ID | `linxdot-<lower-eui>` (operator may override) |
+| Frequency plan | per-cluster default (`EU_863_870` for `eu1`, `US_902_928_FSB_2` for `nam1`, etc.) |
+
+The admin API key needs the **Manage gateways** right (or at minimum `RIGHT_USER_GATEWAYS_CREATE` plus `RIGHT_GATEWAY_SETTINGS_API_KEYS` on the new gateway). It is held only in memory during the wizard run — never written to disk. The wizard:
+
+1. Bootstraps basicstation with a placeholder LNS key so it prints the Gateway EUI from the SX1302 chip; the wizard scrapes that from the container logs.
+2. Calls `GET /api/v3/auth_info` to verify the API key works against the chosen cluster, parses the rights array, and aborts early with specific guidance if the create-gateway right is missing.
+3. `POST /api/v3/users/<owner>/gateways` (or `/organizations/<owner>/gateways`) to register the gateway with the EUI, chosen `gateway_id`, frequency plan, and `enforce_duty_cycle=true`.
+4. On 409, parses TTN's `details[].attributes.gateway_id` to find the existing gateway, GETs it, and either silently reuses (if our EUI matches and the API key has access) or falls back to a manual LNS-key paste with a direct console URL.
+5. `POST /api/v3/gateways/<gid>/api-keys` with `RIGHT_GATEWAY_LINK` to mint a fresh LNS key, extracts the `NNSXS.…` value from the response.
+6. For non-`eu1` clusters, copies `/etc/docker-compose.yml` to `/data/docker-compose.yml` and rewrites `TTS_REGION` to match the chosen cluster.
+7. Writes the LNS key to `/data/basicstation/tc_key.txt` (mode 600), restarts basicstation via `S80dockercompose restart`, polls Docker logs for `Connected to MUXS` (timeout 60 s).
+8. Writes `setup-complete` to `/data/.setup-state`. Re-running the wizard at this point prints status only (TC key present, basicstation running, TTN connected) without re-prompting.
+
+JSON parsing is awk/sed/`tr`-based; no `jq` dependency. `curl` is the only network tool used.
+
+Caveat for retests: TTN community cluster only allows users to soft-delete gateways (purge requires admin rights), and the EUI stays held by the soft-deleted entry for the cluster's restore window (typically 7 days). Don't delete a gateway just to re-register the same EUI — instead, re-run the wizard with the same `gateway_id` and let the conflict resolver reuse the existing TTN registration.
 
 ### 8.4 Migration from pre-A/B (Phase 1 → Phase 3+)
 

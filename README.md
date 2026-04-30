@@ -59,26 +59,45 @@ The wizard validates the MAC, writes it into the eMMC hardware boot partition, a
 
 ### 4. Connect to TTN
 
-SSH back in at the new (case-MAC) IP and run the wizard again:
+You'll need a TTN admin API key with the **Manage gateways** right (one-time, reusable across devices). Create it once at https://eu1.cloud.thethings.network → click your profile picture (top right) → **Personal API keys** → **+ Add API key** → tick **Manage gateways** → Create. TTN shows the `NNSXS.…` value once — copy it.
+
+Then SSH back in at the new (case-MAC) IP and run the wizard again:
 
 ```bash
 ssh root@<new-device-ip>
 linxdot-setup
 ```
 
-This time it runs Phase 2: starts basicstation, reads the Gateway EUI off the SX1302 chip, prints it to you, and walks you through TTN Console — register the gateway with that EUI, generate an LNS API key (the `NNSXS.…` value), paste it back into the wizard. The wizard installs the key on `/data`, restarts basicstation, and waits for the `Connected to MUXS` handshake. When you see "Setup complete — your gateway is live on TTN" you're done.
+Phase 2 prompts you for:
 
-The key lives on `/data` and survives reboots and OTA updates — you only do this once per device.
+| Field | Default / hint |
+|---|---|
+| TTN cluster | `eu1` (Europe) — or `nam1` / `au1` / `as1` |
+| TTN user or organization ID | your TTN handle |
+| User or organization | `u` (most common) |
+| Admin API key | the `NNSXS.…` value from above |
+| Gateway ID | `linxdot-<eui>` auto-generated; press Enter to accept |
+| Frequency plan | per cluster default (`EU_863_870` for `eu1`); press Enter |
+
+The wizard reads the Gateway EUI from the SX1302 chip, calls TTN's REST API to register the gateway and mint a fresh LNS key, writes the key to `/data/basicstation/tc_key.txt`, restarts basicstation, and waits for the `Connected to MUXS` handshake. When you see **"Setup complete — your gateway is live on TTN"** you're done.
+
+If the gateway with this EUI is already registered (e.g. you re-ran the wizard), the conflict resolver detects it from TTN's response and reuses the existing gateway. If TTN's response says the gateway is owned by a different tenant, the wizard falls back to asking for an LNS key paste.
+
+The LNS key lives on `/data` and survives reboots and OTA updates. The admin API key is held only in memory during the wizard run — never written to disk.
+
+> ⚠️ **Don't soft-delete a TTN-registered gateway and immediately try to re-register it.** TTN community cluster only lets users soft-delete (admins can purge); the EUI stays "captive" for the cluster's restore window (~7 days) and re-registration fails with `gateway_eui_taken`. If you need to retest, re-run the wizard with the same gateway_id — the conflict resolver reuses the existing TTN registration.
 
 ### 5. Change region (optional)
 
-Default is `eu1` (Europe). To switch to another TTN cluster, drop a `/data` override of the compose file (this also makes your customization OTA-safe — runtime edits to `/etc/docker-compose.yml` stack on the overlayfs and can mask future firmware fixes):
+If you picked a non-`eu1` cluster in step 4, the wizard already wrote `/data/docker-compose.yml` with the right `TTS_REGION` for you. To change cluster after setup:
 
 ```bash
-cp /etc/docker-compose.yml /data/docker-compose.yml   # /data override is bind-mounted at boot
-vi /data/docker-compose.yml                           # TTS_REGION: eu1 | nam1 | au1 | ...
+ssh root@<device-ip>
+vi /data/docker-compose.yml                           # TTS_REGION: eu1 | nam1 | au1 | as1
 /etc/init.d/S80dockercompose restart
 ```
+
+The `/data` override is bind-mounted on top of `/etc/docker-compose.yml` at boot, so it survives OTA updates.
 
 ---
 
