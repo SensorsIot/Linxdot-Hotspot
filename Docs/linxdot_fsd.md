@@ -454,31 +454,31 @@ ssh root@<new-device-ip>
 linxdot-setup
 ```
 
-Phase B drives a REST conversation with the chosen TTN cluster's identity server. Inputs:
+Phase B drives a REST conversation with the chosen TTN cluster's identity server. Inputs (gateway name + frequency plan are only prompted when registering a brand-new gateway — see step 3 below):
 
 | Prompt | Default |
 |---|---|
 | Cluster | `eu1` (or `nam1` / `au1` / `as1`) |
 | User / org ID | the operator's TTN handle |
 | User or organization | `u` (most common) |
-| Admin API key (`NNSXS.…`) | none — operator pastes this |
-| Gateway ID | `linxdot-<lower-eui>` (operator may override) |
-| Frequency plan | per-cluster default (`EU_863_870` for `eu1`, `US_902_928_FSB_2` for `nam1`, etc.) |
+| Admin API key | operator pastes any blob containing `NNSXS.<token>` — wizard extracts via `grep -oE 'NNSXS\.[A-Z0-9.]+'` |
+| Gateway name *(new only)* | `linxdot-<lower-eui>` (operator may override) |
+| Frequency plan *(new only)* | per-cluster default (`EU_863_870` for `eu1`, `US_902_928_FSB_2` for `nam1`, etc.) |
 
 The admin API key needs the **Manage gateways** right (or at minimum `RIGHT_USER_GATEWAYS_CREATE` plus `RIGHT_GATEWAY_SETTINGS_API_KEYS` on the new gateway). It is held only in memory during the wizard run — never written to disk. The wizard:
 
 1. Bootstraps basicstation with a placeholder LNS key so it prints the Gateway EUI from the SX1302 chip; the wizard scrapes that from the container logs.
-2. Calls `GET /api/v3/auth_info` to verify the API key works against the chosen cluster, parses the rights array, and aborts early with specific guidance if the create-gateway right is missing.
-3. `POST /api/v3/users/<owner>/gateways` (or `/organizations/<owner>/gateways`) to register the gateway with the EUI, chosen `gateway_id`, frequency plan, and `enforce_duty_cycle=true`.
-4. On 409, parses TTN's `details[].attributes.gateway_id` to find the existing gateway, GETs it, and either silently reuses (if our EUI matches and the API key has access) or falls back to a manual LNS-key paste with a direct console URL.
+2. Calls `GET /api/v3/auth_info` to verify the API key works against the chosen cluster, parses the rights array, and reports an actionable error if the create-gateway right is missing. **Recoverable errors loop**: instead of aborting, the wizard prints the "What to do" block and waits for the operator to fix the issue (typo, missing right, stale clock, network blip) and press Enter to retry.
+3. `GET /api/v3/<owner_path>/gateways?field_mask=ids&limit=1000` to find any gateway already registered with the device's EUI under the same owner. If a match is found, the wizard skips the gateway-name + frequency-plan prompts and adopts that `gateway_id`. The list call also doubles as the owner-validation step (404 → typo, 401/403 → missing list right).
+4. If no match: `POST /api/v3/users/<owner>/gateways` (or `/organizations/<owner>/gateways`) registers the gateway with the prompted name, EUI, frequency plan, and `enforce_duty_cycle=true`. On 409 (cross-tenant — owner couldn't list it but TTN has it) the wizard parses TTN's `details[].attributes.gateway_id` to find the existing gateway, GETs it, and either silently reuses or falls back to a manual LNS-key paste with a direct console URL.
 5. `POST /api/v3/gateways/<gid>/api-keys` with `RIGHT_GATEWAY_LINK` to mint a fresh LNS key, extracts the `NNSXS.…` value from the response.
 6. For non-`eu1` clusters, copies `/etc/docker-compose.yml` to `/data/docker-compose.yml` and rewrites `TTS_REGION` to match the chosen cluster.
-7. Writes the LNS key to `/data/basicstation/tc_key.txt` (mode 600), restarts basicstation via `S80dockercompose restart`, polls Docker logs for `Connected to MUXS` (timeout 60 s).
+7. Writes the LNS key to `/data/basicstation/tc_key.txt` (mode 600), restarts basicstation via `S80dockercompose restart`, polls Docker logs for `Connected to MUXS` (timeout 60 s). The handshake step also loops on failure — the operator can fix clock / region / firewall in another shell and press Enter to retry.
 8. Writes `setup-complete` to `/data/.setup-state`. Re-running the wizard at this point prints status only (TC key present, basicstation running, TTN connected) without re-prompting.
 
 JSON parsing is awk/sed/`tr`-based; no `jq` dependency. `curl` is the only network tool used.
 
-Caveat for retests: TTN community cluster only allows users to soft-delete gateways (purge requires admin rights), and the EUI stays held by the soft-deleted entry for the cluster's restore window (typically 7 days). Don't delete a gateway just to re-register the same EUI — instead, re-run the wizard with the same `gateway_id` and let the conflict resolver reuse the existing TTN registration.
+Caveat for retests: TTN community cluster only allows users to soft-delete gateways (purge requires admin rights), and the EUI stays held by the soft-deleted entry for the cluster's restore window (typically 7 days). Don't delete a gateway just to re-register the same EUI — re-run the wizard with the same `gateway_id` and the EUI-list pre-check (step 3) will reuse the existing TTN registration.
 
 ### 8.4 Migration from pre-A/B (Phase 1 → Phase 3+)
 

@@ -75,13 +75,19 @@ Phase 2 prompts you for:
 | TTN cluster | `eu1` (Europe) — or `nam1` / `au1` / `as1` |
 | TTN user or organization ID | your TTN handle |
 | User or organization | `u` (most common) |
-| Admin API key | the `NNSXS.…` value from above |
-| Gateway ID | `linxdot-<eui>` auto-generated; press Enter to accept |
-| Frequency plan | per cluster default (`EU_863_870` for `eu1`); press Enter |
+| Admin API key | paste anything containing `NNSXS.…` — the wizard extracts the token from whatever you pasted (whole console row, "API key: …" labels, surrounding whitespace all fine) |
+| Gateway name | only asked for **new** registrations; default `linxdot-<eui>` |
+| Frequency plan | only asked for **new** registrations; default per cluster |
 
-The wizard reads the Gateway EUI from the SX1302 chip, calls TTN's REST API to register the gateway and mint a fresh LNS key, writes the key to `/data/basicstation/tc_key.txt`, restarts basicstation, and waits for the `Connected to MUXS` handshake. When you see **"Setup complete — your gateway is live on TTN"** you're done.
+The wizard then queries TTN to see whether this device's EUI is already registered under your account:
 
-If the gateway with this EUI is already registered (e.g. you re-ran the wizard), the conflict resolver detects it from TTN's response and reuses the existing gateway. If TTN's response says the gateway is owned by a different tenant, the wizard falls back to asking for an LNS key paste.
+- **If yes** — silently reuses the existing gateway, mints a fresh LNS key, no name/freq-plan prompts.
+- **If no** — asks for the gateway name + frequency plan, registers it, mints the key.
+- **If owned by a different tenant** — falls back to asking for an LNS key paste.
+
+It writes the key to `/data/basicstation/tc_key.txt`, restarts basicstation, and waits for the `Connected to MUXS` handshake. When you see **"Setup complete — your gateway is live on TTN"** you're done.
+
+Errors don't end the wizard — every fixable problem (typo'd handle, missing right on the API key, stale clock, network blip) shows a "What to do:" block and asks you to press Enter to retry. Fix it in another shell or in the TTN console, hit Enter, the wizard re-validates and continues.
 
 The LNS key lives on `/data` and survives reboots and OTA updates. The admin API key is held only in memory during the wizard run — never written to disk.
 

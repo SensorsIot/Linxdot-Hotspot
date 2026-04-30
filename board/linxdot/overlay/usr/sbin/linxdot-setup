@@ -68,6 +68,15 @@ confirm() {
     esac
 }
 
+prompt_retry() {
+    # After an actionable error, ask the user to fix and continue. Returns
+    # 0 on retry (caller should `continue`), 1 if the user wants to abort.
+    printf '\nFix the issue above, then press Enter to retry (type "abort" to give up): ' >&2
+    read answer || return 1
+    case "$answer" in abort|ABORT|quit|exit|q|Q) return 1 ;; esac
+    return 0
+}
+
 normalize_mac() {
     # Lower-case, accept either ':' or '-' separators, output canonical
     # aa:bb:cc:dd:ee:ff. Echoes nothing on bad input.
@@ -238,6 +247,31 @@ cluster_freqplan_default() {
     esac
 }
 
+find_gateway_by_eui() {
+    # Search the owner's existing gateways for one matching $eui.
+    # Sets the global $existing_gid (empty if no match). Opportunistic:
+    # if the API key lacks the LIST right we silently return empty and
+    # the caller falls through to the create-and-handle-409 path.
+    existing_gid=
+    ttn_request GET "/api/v3/${owner_path}/gateways?field_mask=ids&limit=1000"
+    [ "$HTTP_STATUS" = 200 ] || return 0
+
+    eui_uc=$(printf '%s' "$eui" | tr 'a-f' 'A-F')
+    eui_lc=$(printf '%s' "$eui" | tr 'A-F' 'a-f')
+    # TTS serializes ids as {"gateway_id":"...","eui":"..."} compactly with
+    # no whitespace and gateway_id first (proto field 1 vs 2). Match either
+    # case for the EUI value.
+    for pat in \
+        "\"gateway_id\":\"[^\"]*\",\"eui\":\"$eui_uc\"" \
+        "\"gateway_id\":\"[^\"]*\",\"eui\":\"$eui_lc\""; do
+        existing_gid=$(printf '%s' "$TTN_RESPONSE" \
+            | grep -oE "$pat" \
+            | head -1 \
+            | sed -n 's/.*"gateway_id":"\([^"]*\)".*/\1/p')
+        [ -n "$existing_gid" ] && return 0
+    done
+}
+
 resolve_gateway_conflict() {
     # Called after POST gateway returns 409. TTN's error body includes
     # `details[].attributes.gateway_id` naming the existing gateway, so
@@ -397,207 +431,286 @@ EOF
 
   Gateway EUI: $eui
 
-------------------------------------------------------------------
-One-time setup: create a TTN admin API key
-------------------------------------------------------------------
-
-If you don't have one yet, do this once (re-usable across devices):
-
-  1. Open https://console.cloud.thethings.network and sign in.
-  2. Click your user picture (top right) -> "Personal API keys".
-  3. Click "+ Add API key", give it a name like "OpenLinxdot
-     provisioning".
-  4. Tick AT MINIMUM these rights (under the "Gateways" section):
-       [x] Create gateways under the user account
-     For a smoother experience also tick:
-       [x] View gateway information
-       [x] Edit gateway settings
-     Or just tick the top-level "Manage gateways" to grant all
-     gateway-related rights — easiest, recommended for a personal
-     provisioning key.
-  5. Click Create. TTN shows the NNSXS.… value once — copy it now.
-
 EOF
 
-    # Cluster
-    cat <<'EOF'
+    # ---- Credential collection + validation, all in one retry loop ------
+    # The user can fix typos / cluster / key / rights and continue without
+    # re-running the wizard. We selectively clear inputs to force re-prompt
+    # of just the bit that's wrong; on permission fixes (which take effect
+    # immediately on the same key) we keep the inputs and just re-validate.
+    TTN_CLUSTER=
+    owner=
+    owner_kind=
+    TTN_API_KEY=
+
+    while :; do
+        # Cluster
+        if [ -z "$TTN_CLUSTER" ]; then
+            cat <<'EOF'
 Which TTN cluster do you use?
   1) eu1   (Europe — default)
   2) nam1  (North America)
   3) au1   (Australia)
   4) as1   (Asia)
 EOF
-    while :; do
-        printf 'Cluster [1-4, default 1]: ' >&2
-        read choice || exit 1
-        case "${choice:-1}" in
-            1|eu1)  TTN_CLUSTER=eu1;  break ;;
-            2|nam1) TTN_CLUSTER=nam1; break ;;
-            3|au1)  TTN_CLUSTER=au1;  break ;;
-            4|as1)  TTN_CLUSTER=as1;  break ;;
-            *) echo "  invalid choice" >&2 ;;
+            while :; do
+                printf 'Cluster [1-4, default 1]: ' >&2
+                read choice || exit 1
+                case "${choice:-1}" in
+                    1|eu1)  TTN_CLUSTER=eu1;  break ;;
+                    2|nam1) TTN_CLUSTER=nam1; break ;;
+                    3|au1)  TTN_CLUSTER=au1;  break ;;
+                    4|as1)  TTN_CLUSTER=as1;  break ;;
+                    *) echo "  invalid choice" >&2 ;;
+                esac
+            done
+        fi
+
+        # Owner (user/org)
+        if [ -z "$owner" ]; then
+            while :; do
+                owner=$(ask "TTN user or organization ID: ")
+                case "$owner" in
+                    [a-z0-9][a-z0-9_-]*) break ;;
+                    *) echo "  TTN IDs are lowercase letters/digits, '-' or '_'." >&2; owner= ;;
+                esac
+            done
+            printf 'Is "%s" a user or an organization? [u/o, default u]: ' "$owner" >&2
+            read owner_kind || exit 1
+            : "${owner_kind:=u}"
+        fi
+        case "$owner_kind" in
+            o|O|org|Org|ORG) owner_path="organizations/${owner}";
+                             collab='"organization_ids":{"organization_id":"'"$owner"'"}'
+                             owner_label=organization ;;
+            *)               owner_path="users/${owner}"
+                             collab='"user_ids":{"user_id":"'"$owner"'"}'
+                             owner_label=user ;;
         esac
-    done
 
-    # User/Org id
-    while :; do
-        owner=$(ask "TTN user or organization ID: ")
-        case "$owner" in
-            [a-z0-9][a-z0-9_-]*) break ;;
-            *) echo "  TTN IDs are lowercase letters/digits, '-' or '_'." >&2 ;;
-        esac
-    done
-    printf 'Is "%s" a user or an organization? [u/o, default u]: ' "$owner" >&2
-    read owner_kind || exit 1
-    case "${owner_kind:-u}" in
-        o|O|org|Org|ORG) owner_path="organizations/${owner}"; collab='"organization_ids":{"organization_id":"'"$owner"'"}' ;;
-        *)              owner_path="users/${owner}";          collab='"user_ids":{"user_id":"'"$owner"'"}' ;;
-    esac
+        # API key. Accept any pasted blob — extract the NNSXS.<token>.
+        if [ -z "$TTN_API_KEY" ]; then
+            while :; do
+                raw=$(ask "Paste your TTN admin API key: ")
+                TTN_API_KEY=$(printf '%s' "$raw" | grep -oE 'NNSXS\.[A-Z0-9.]+' | head -1)
+                if [ -n "$TTN_API_KEY" ] && [ "${#TTN_API_KEY}" -ge 32 ]; then
+                    break
+                fi
+                echo "  Couldn't find an NNSXS.<key> in the pasted text. Try again." >&2
+                TTN_API_KEY=
+            done
+        fi
 
-    # Bootstrap API key
-    while :; do
-        TTN_API_KEY=$(ask "Paste your TTN admin API key (NNSXS.…): ")
-        case "$TTN_API_KEY" in
-            NNSXS.*) [ "${#TTN_API_KEY}" -ge 32 ] && break
-                     echo "  too short — real TTN keys are ~80+ chars" >&2 ;;
-            *) echo "  must start with 'NNSXS.'" >&2 ;;
-        esac
-    done
+        # Validate: auth_info checks key + cluster. Print "OK" only after
+        # the follow-up rights check also passes (single line covers both).
+        printf "Verifying API key against %s.cloud.thethings.network… " "$TTN_CLUSTER" >&2
+        ttn_request GET /api/v3/auth_info
+        case "$HTTP_STATUS" in
+            200) ;;
+            000)
+                echo
+                cat >&2 <<EOF
+ERROR: could not reach TTN at ${TTN_CLUSTER}.cloud.thethings.network.
 
-    # Probe the API key against the chosen cluster before we go further.
-    printf "Verifying API key against %s.cloud.thethings.network… " "$TTN_CLUSTER" >&2
-    ttn_request GET /api/v3/auth_info
-    case "$HTTP_STATUS" in
-        200) echo "OK" >&2 ;;
-        000) echo "FAIL" >&2; echo "  could not reach TTN — check internet." >&2; exit 1 ;;
-        400|401|403)
-            echo "FAIL ($HTTP_STATUS)" >&2
-            msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
-            echo "  TTN says: ${msg:-(no message)}" >&2
-            echo "  → check the API key is correct and that you picked"      >&2
-            echo "    the right cluster ($TTN_CLUSTER)."                     >&2
-            exit 1
-            ;;
-        *)
-            echo "FAIL ($HTTP_STATUS)" >&2
-            msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
-            echo "  TTN says: ${msg:-(no message)}" >&2
-            exit 1
-            ;;
-    esac
-
-    # Pre-flight: verify the API key has the right needed for gateway-create.
-    # Auth-info returns "rights":["RIGHT_FOO","RIGHT_BAR",...]. We require
-    # RIGHT_(USER|ORGANIZATION)_GATEWAYS_CREATE depending on owner_kind, or
-    # RIGHT_ALL as a wildcard. If missing, list the rights the key DOES have
-    # so the user can compare against what's ticked in TTN Console.
-    rights=$(printf '%s' "$TTN_RESPONSE" | tr -d '\n' \
-        | sed -n 's|.*"rights"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*|\1|p' \
-        | tr -d '" ')
-    case "$owner_kind" in
-        o|O|org|Org|ORG) needed=RIGHT_ORGANIZATION_GATEWAYS_CREATE ;;
-        *)               needed=RIGHT_USER_GATEWAYS_CREATE ;;
-    esac
-    case ",$rights," in
-        *,RIGHT_ALL,*|*,"$needed",*)
-            echo "  API key has $needed — good." >&2
-            ;;
-        *)
-            echo
-            cat >&2 <<EOF
-  ERROR: this API key is missing the right needed to create gateways:
-      $needed
-
-  The key currently has these rights:
+What to do:
+  1. Check the device has internet (curl -sI https://github.com).
+  2. If you got 'certificate not yet valid', run /usr/sbin/clock-bootstrap.
 EOF
-            if [ -n "$rights" ]; then
-                printf '%s' "$rights" | tr ',' '\n' | sed 's/^/      /' >&2
-            else
-                echo "      (none)" >&2
-            fi
-            cat >&2 <<EOF
+                prompt_retry || exit 1
+                continue
+                ;;
+            400|401|403)
+                echo
+                msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+                cat >&2 <<EOF
+ERROR: TTN rejected the API key (HTTP $HTTP_STATUS).
+  TTN says: ${msg:-(no message)}
 
-  Fix in TTN Console:
-    1. profile (top right) -> Personal API keys
-    2. Click your provisioning key
-    3. Under "Rights", tick:
-         [x] Create gateways under the user account
-       (the internal name for this right is $needed)
-       Easiest: tick the top-level "Manage gateways" / Grant all
-       rights related to gateways.
-    4. Save. Re-run linxdot-setup with the same API key — the
-       change takes effect immediately.
-
+What to do:
+  Either the cluster is wrong or the key is bad/expired. Get a fresh key:
+    https://${TTN_CLUSTER}.cloud.thethings.network/console → profile
+    (top right) → Personal API keys → Add API key → tick "Manage
+    gateways" → Create.
 EOF
-            exit 1
-            ;;
-    esac
+                TTN_API_KEY=         # re-prompt key
+                TTN_CLUSTER=         # let user pick a different cluster too
+                prompt_retry || exit 1
+                continue
+                ;;
+            *)
+                echo
+                msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+                cat >&2 <<EOF
+ERROR: TTN responded with HTTP $HTTP_STATUS.
+  TTN says: ${msg:-(no message)}
+EOF
+                prompt_retry || exit 1
+                continue
+                ;;
+        esac
 
-    # Gateway ID
-    default_id=$(eui_to_id "$eui")
-    while :; do
-        printf 'Gateway ID [default %s]: ' "$default_id" >&2
-        read gid || exit 1
-        gid=${gid:-$default_id}
-        case "$gid" in
-            [a-z][a-z0-9_-]*[a-z0-9]) break ;;
-            *) echo "  start with a lowercase letter, then [a-z0-9_-], end alphanumeric" >&2 ;;
+        # Validate: API key has the right needed for gateway-create.
+        rights=$(printf '%s' "$TTN_RESPONSE" | tr -d '\n' \
+            | sed -n 's|.*"rights"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*|\1|p' \
+            | tr -d '" ')
+        case "$owner_kind" in
+            o|O|org|Org|ORG) needed=RIGHT_ORGANIZATION_GATEWAYS_CREATE ;;
+            *)               needed=RIGHT_USER_GATEWAYS_CREATE ;;
+        esac
+        case ",$rights," in
+            *,RIGHT_ALL,*|*,"$needed",*)
+                echo "OK (has $needed)" >&2
+                ;;
+            *)
+                echo
+                cat >&2 <<EOF
+ERROR: this API key is missing $needed.
+EOF
+                if [ -n "$rights" ]; then
+                    echo "  Key currently has:" >&2
+                    printf '%s' "$rights" | tr ',' '\n' | sed 's/^/    /' >&2
+                else
+                    echo "  Key currently has no rights." >&2
+                fi
+                cat >&2 <<EOF
+
+What to do:
+  Open https://${TTN_CLUSTER}.cloud.thethings.network/console → profile
+  (top right) → Personal API keys → click your key → tick "Manage
+  gateways" → Save. (The change takes effect immediately on the same key.)
+EOF
+                prompt_retry || exit 1
+                continue   # keep TTN_API_KEY — same key, fresher rights
+                ;;
+        esac
+
+        # Validate: owner exists + key can list its gateways. Doubles as
+        # the "is this device already registered?" check.
+        printf "Checking TTN for an existing registration of EUI %s… " "$eui" >&2
+        find_gateway_by_eui
+        case "$HTTP_STATUS" in
+            200) break ;;   # success — exit input-collection loop
+            401|403)
+                echo
+                cat >&2 <<EOF
+ERROR: API key can't list gateways under $owner_label '$owner' (HTTP $HTTP_STATUS).
+
+What to do:
+  1. Check '$owner' is spelled correctly (TTN IDs are case-sensitive).
+  2. If the spelling is right, tick "Manage gateways" in the TTN console
+     (the change takes effect immediately).
+EOF
+                owner=               # re-prompt owner
+                prompt_retry || exit 1
+                continue
+                ;;
+            404)
+                echo
+                cat >&2 <<EOF
+ERROR: $owner_label '$owner' does not exist on TTN.
+
+What to do: check the spelling — your handle is the segment after
+/users/ in the TTN console URL once you're signed in.
+EOF
+                owner=               # re-prompt owner
+                prompt_retry || exit 1
+                continue
+                ;;
+            *)
+                echo
+                msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+                cat >&2 <<EOF
+ERROR: TTN returned HTTP $HTTP_STATUS while listing gateways.
+  TTN says: ${msg:-(no message)}
+EOF
+                prompt_retry || exit 1
+                continue
+                ;;
         esac
     done
 
-    # Frequency plan
-    default_fp=$(cluster_freqplan_default "$TTN_CLUSTER")
-    printf 'Frequency plan [default %s]: ' "$default_fp" >&2
-    read fp || exit 1
-    fp=${fp:-$default_fp}
+    if [ -n "$existing_gid" ]; then
+        echo "found '$existing_gid'." >&2
+        gid=$existing_gid
+    else
+        echo "none — will register a new one." >&2
 
-    cat <<EOF
+        # Gateway ID
+        default_id=$(eui_to_id "$eui")
+        while :; do
+            printf 'Gateway name [default %s]: ' "$default_id" >&2
+            read gid || exit 1
+            gid=${gid:-$default_id}
+            case "$gid" in
+                [a-z][a-z0-9_-]*[a-z0-9]) break ;;
+                *) echo "  start with a lowercase letter, then [a-z0-9_-], end alphanumeric" >&2 ;;
+            esac
+        done
+
+        # Frequency plan
+        default_fp=$(cluster_freqplan_default "$TTN_CLUSTER")
+        printf 'Frequency plan [default %s]: ' "$default_fp" >&2
+        read fp || exit 1
+        fp=${fp:-$default_fp}
+
+        cat <<EOF
 
   Cluster      : $TTN_CLUSTER
   Owner        : $owner ($owner_path)
-  Gateway ID   : $gid
+  Gateway name : $gid
   Gateway EUI  : $eui
   Freq. plan   : $fp
 
 EOF
-    printf 'Create this gateway on TTN? [Y/n] ' >&2
-    read go || exit 1
-    case "$go" in n|N|no|NO) echo "Aborted." >&2; exit 1 ;; esac
+        printf 'Create this gateway on TTN? [Y/n] ' >&2
+        read go || exit 1
+        case "$go" in n|N|no|NO) echo "Aborted." >&2; exit 1 ;; esac
 
-    # ---- Create gateway -------------------------------------------------
-    body=$(printf '{"gateway":{"ids":{"gateway_id":"%s","eui":"%s"},"name":"%s","frequency_plan_id":"%s","enforce_duty_cycle":true,"status_public":true},"collaborator":{%s}}' \
-        "$gid" "$eui" "$gid" "$fp" "$collab")
-    printf "Creating gateway on TTN… " >&2
-    ttn_request POST "/api/v3/${owner_path}/gateways" "$body"
-    case "$HTTP_STATUS" in
-        200|201) echo "OK" >&2 ;;
-        409)    resolve_gateway_conflict ;;
-        401|403)
-            echo "FAIL ($HTTP_STATUS)" >&2
-            msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
-            echo "  TTN says: ${msg:-(no message)}" >&2
-            cat >&2 <<EOF
-  → The API key authenticates, but doesn't have permission to
-    create gateways under user '$owner'.
+        body=$(printf '{"gateway":{"ids":{"gateway_id":"%s","eui":"%s"},"name":"%s","frequency_plan_id":"%s","enforce_duty_cycle":true,"status_public":true},"collaborator":{%s}}' \
+            "$gid" "$eui" "$gid" "$fp" "$collab")
+        printf "Registering '%s' on TTN… " "$gid" >&2
+        ttn_request POST "/api/v3/${owner_path}/gateways" "$body"
+        case "$HTTP_STATUS" in
+            200|201) echo "OK" >&2 ;;
+            409)
+                # Pre-check missed it — typically means the EUI is owned
+                # by a DIFFERENT tenant (find_gateway_by_eui only looks
+                # under the current owner). Fall through to the existing
+                # cross-tenant resolver.
+                echo >&2
+                resolve_gateway_conflict
+                ;;
+            401|403)
+                echo >&2
+                msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+                cat >&2 <<EOF
+ERROR: the API key can't create gateways under '$owner'.
+  TTN says: ${msg:-(no message)}
 
-  Fix: in TTN Console -> profile -> Personal API keys, edit your
-  API key (or create a new one) and tick under "Gateways":
-       [x] Create gateways under the user account
-  Easiest is to tick the top-level "Manage gateways" which grants
-  all gateway rights at once.
-
-  Note: simply ticking the right on an EXISTING key takes effect
-  immediately — you don't need to re-paste the key. Re-run
-  linxdot-setup with the same key.
+What to do:
+  1. Open https://${TTN_CLUSTER}.cloud.thethings.network → profile (top
+     right) → Personal API keys → click your provisioning key.
+  2. Under "Gateways", tick "Manage gateways" (or at minimum
+     "Create gateways under the user account").
+  3. Save. Re-run linxdot-setup with the same key — the change takes
+     effect immediately.
 EOF
-            exit 1
-            ;;
-        *)
-            echo "FAIL ($HTTP_STATUS)" >&2
-            echo "  TTN says: $(printf '%s' "$TTN_RESPONSE" | json_str message)"  >&2
-            exit 1
-            ;;
-    esac
+                exit 1
+                ;;
+            *)
+                echo >&2
+                msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+                cat >&2 <<EOF
+ERROR: TTN refused the gateway registration (HTTP $HTTP_STATUS).
+  TTN says: ${msg:-(no message)}
+
+What to do: re-run linxdot-setup. If the same error recurs, copy the
+TTN message above and check the TTN forum / open an issue.
+EOF
+                exit 1
+                ;;
+        esac
+    fi
 
     # ---- LNS API key: reuse, auto-create, or prompt for paste ----------
     if [ -n "$LNS_KEY_OVERRIDE" ]; then
@@ -642,21 +755,29 @@ EOF
     echo "LNS key saved. Restarting basicstation…" >&2
     /etc/init.d/S80dockercompose restart >/dev/null 2>&1 || true
 
-    printf "Waiting for TTN handshake (up to %d s)…\n" "$MUXS_TIMEOUT" >&2
-    if ! wait_for_muxs; then
+    # ---- Verification: device side -----------------------------------
+    while :; do
+        printf "Waiting for basicstation to reach TTN (up to %d s)…\n" "$MUXS_TIMEOUT" >&2
+        if wait_for_muxs; then
+            echo "  TLS handshake to ${TTN_CLUSTER}.cloud.thethings.network OK — basicstation Connected to MUXS." >&2
+            break
+        fi
         cat >&2 <<EOF
 
-ERROR: basicstation did not reach 'Connected to MUXS' within
-${MUXS_TIMEOUT}s. The gateway IS registered on TTN and the LNS key
-IS installed, so this is usually a region or network issue. See:
-    docker logs basicstation 2>&1 | tail -30
-State left at 'mac-bound' — re-run linxdot-setup once you've fixed
-the underlying issue (re-run will see the existing gateway + key
-and just retry the handshake).
+ERROR: basicstation did not reach 'Connected to MUXS' within ${MUXS_TIMEOUT}s.
+The gateway IS registered on TTN and the LNS key IS installed — this is
+almost always a device-side network or clock issue.
 
+What to do:
+  1. Inspect basicstation: docker logs basicstation 2>&1 | tail -30
+  2. Common causes:
+     - stale clock → run: /usr/sbin/clock-bootstrap
+     - wrong region → edit /data/docker-compose.yml (TTS_REGION:),
+       then: /etc/init.d/S80dockercompose restart
+     - blocked outbound TCP/443 + 8887 to ${TTN_CLUSTER}.cloud.thethings.network
 EOF
-        exit 1
-    fi
+        prompt_retry || exit 1
+    done
 
     # forget the bootstrap key — never persisted to disk
     TTN_API_KEY=
@@ -669,12 +790,11 @@ EOF
  Setup complete — your gateway is live on TTN.
 ================================================================
 
-  Gateway ID  : $gid
-  Gateway EUI : $eui
-  Cluster     : $TTN_CLUSTER
-  Connection  : Connected to MUXS
+  Gateway name : $gid
+  Gateway EUI  : $eui
+  Cluster      : $TTN_CLUSTER
+  Connection   : Connected to MUXS
 
-Verify on the TTN Console: the gateway should show "Connected".
 Send your first uplink to confirm the LoRa side.
 
 You're done. The wizard won't prompt again on this device. To redo
