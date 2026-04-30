@@ -9,10 +9,16 @@
 # Why on-demand (not in init): the LD1001 has no battery-backed RTC,
 # so the kernel clock resets on every power loss (observed:
 # 2017-08-05). TLS server-cert validation then fails "cert not yet
-# valid" until something steps the clock. We call this helper from the
-# consumers that actually need TLS — `ota-check` (HTTPS to GitHub) and
-# `S80dockercompose start` (basicstation's WSS to TTN) — rather than
-# blocking boot on an unconditional NTP round-trip.
+# valid" until something steps the clock. We call this helper from
+# the consumers that actually need TLS — `S49ntp` (before binding the
+# disciplining daemon) and `ota-check` (before its HTTPS curl) — rather
+# than blocking boot on an unconditional NTP round-trip.
+#
+# Port-123 contention: `ntpd -gq` needs to bind udp/123 in client mode.
+# If the system ntpd from `S49ntp` is already running it holds that
+# port, and our child ntpd dies instantly with "unable to bind …
+# EXITING". We detect that case, stop the disciplining daemon, do the
+# step, and restart it on the way out.
 
 NTP_SERVERS="pool.ntp.org time.cloudflare.com time.google.com"
 WATCHDOG_SEC=30
@@ -21,6 +27,30 @@ year=$(date -u +%Y)
 if [ "$year" -ge 2024 ]; then
     exit 0
 fi
+
+# If the system ntpd holds udp/123, free it for our `ntpd -gq` and
+# remember to restart it. At boot, S49ntp calls us before starting its
+# daemon so this branch is a no-op; runtime callers (ota-check, manual
+# invocations) hit it.
+restart_ntpd=0
+if pidof ntpd >/dev/null 2>&1; then
+    restart_ntpd=1
+    if [ -x /etc/init.d/S49ntp ]; then
+        /etc/init.d/S49ntp stop >/dev/null 2>&1 || true
+    fi
+    killall ntpd 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        pidof ntpd >/dev/null 2>&1 || break
+        sleep 1
+    done
+fi
+
+restore_ntpd() {
+    if [ "$restart_ntpd" = 1 ] && [ -x /etc/init.d/S49ntp ]; then
+        /etc/init.d/S49ntp start >/dev/null 2>&1 || true
+    fi
+}
+trap restore_ntpd EXIT
 
 ntp_step() {
     # `ntpd -gq <server>`: -g lets the first adjust exceed the panic

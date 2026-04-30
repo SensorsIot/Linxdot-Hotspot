@@ -1,0 +1,66 @@
+#!/bin/sh
+#
+# S49ntp — step the wall-clock if stale, then start the disciplining ntpd.
+#
+# Buildroot's stock ntp init script just starts `ntpd -g`. That's not
+# enough on the LD1001 because (a) the kernel clock starts at the build
+# epoch (~2017) on every cold boot, and (b) the persistent /data
+# overlay can ship a 0-byte /etc/ntp.conf left over from earlier
+# firmware revisions, which silently disables disciplining.
+#
+# Boot-time bootstrap: we call `/usr/sbin/clock-bootstrap` before
+# binding udp/123 ourselves — it runs `ntpd -gq <server>` which would
+# otherwise fight us for the port. After it returns the clock is sane,
+# so we can start the long-running ntpd cleanly.
+
+DAEMON=ntpd
+PIDFILE=/var/run/$DAEMON.pid
+NTPD_ARGS="-g"
+
+# Allow operator override (matches the Buildroot stock pattern).
+[ -r /etc/default/$DAEMON ] && . /etc/default/$DAEMON
+
+clean_stale_overlay_conf() {
+    # A 0-byte upper-layer /etc/ntp.conf masks the proper rootfs config
+    # (ships with `server pool.ntp.org iburst` etc.). This is leftover
+    # from pre-1.0.5 firmware where the empty Buildroot package default
+    # was the rootfs version. Remove the empty mask so OTA upgrades
+    # don't keep getting silently undisciplined ntpd.
+    upper=/data/overlay/etc/upper/ntp.conf
+    if [ -e "$upper" ] && [ ! -s "$upper" ]; then
+        rm -f "$upper"
+        mount -o remount /etc 2>/dev/null || true
+    fi
+}
+
+bootstrap_clock() {
+    # Idempotent: no-op if year >= 2024. On a stale clock this runs
+    # `ntpd -gq <server>` and exits in ~7 s with an unreachable list
+    # bounded by a 30 s/server watchdog.
+    [ -x /usr/sbin/clock-bootstrap ] && /usr/sbin/clock-bootstrap || true
+}
+
+start() {
+    clean_stale_overlay_conf
+    bootstrap_clock
+    printf 'Starting %s: ' "$DAEMON"
+    # shellcheck disable=SC2086 # we need word splitting on NTPD_ARGS
+    start-stop-daemon -S -q -p "$PIDFILE" -x "/usr/sbin/$DAEMON" \
+        -- $NTPD_ARGS -p "$PIDFILE"
+    if [ $? -eq 0 ]; then echo OK; else echo FAIL; fi
+}
+
+stop() {
+    printf 'Stopping %s: ' "$DAEMON"
+    start-stop-daemon -K -q -p "$PIDFILE"
+    rc=$?
+    rm -f "$PIDFILE"
+    if [ $rc -eq 0 ]; then echo OK; else echo FAIL; fi
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; start ;;
+    *)       echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
