@@ -5,8 +5,9 @@
 # OpenLinxdot device from "boots and gets a fallback IP" to "talking to
 # TTN with a unit-correct MAC".
 #
-# Phase A (this script today): bind the case sticker MAC to eth0.
-# Phase B (TODO): TTN registration + LNS key install + handshake verify.
+# Phase A: bind the case sticker MAC to eth0.
+# Phase B: read Gateway EUI, walk through TTN registration, install LNS key,
+#          verify the MUXS handshake.
 #
 # State is tracked in /data/.setup-state, which survives OTA and rollback.
 # Re-running the wizard at any time picks up where it left off.
@@ -15,6 +16,9 @@ set -eu
 
 STATE_FILE=/data/.setup-state
 SETUP_MAC="02:00:5d:01:01:01"
+TC_KEY=/data/basicstation/tc_key.txt
+EUI_TIMEOUT=60
+MUXS_TIMEOUT=60
 
 read_state() {
     cat "$STATE_FILE" 2>/dev/null || echo fresh
@@ -82,38 +86,26 @@ Step 1 of 2: Bind the unit's MAC address
 
 The eth0 interface is currently using the shared setup MAC
 $SETUP_MAC. Every fresh OpenLinxdot device announces this
-same address — useful for finding the device on your router, but
-not the unit's real identity.
-
-Look at the case sticker — it shows a MAC address printed in the
-form aa-bb-cc-dd-ee-ff. That's this unit's globally-unique
-IEEE-allocated MAC (FX Technology's MA-M block). Bind it now and
-the device will keep using it forever after, even across firmware
-updates and re-flashes.
+address — useful for finding the device on your router, but not
+the unit's real identity. Bind the unique MAC printed on the case
+sticker now: it's globally-unique and assigned to this unit only.
 
 EOF
 
     while :; do
-        raw=$(ask "Enter the case MAC (or 'skip' to keep the setup MAC): ")
-        case "$raw" in
-            skip|SKIP|s|S)
-                echo
-                echo "OK, keeping the setup MAC. You can run linxdot-setup again later."
-                exit 0
-                ;;
-        esac
+        raw=$(ask "Enter the MAC printed on the case (e.g. 0c:86:29:e0:22:7d): ")
         mac=$(normalize_mac "$raw")
         if [ -n "$mac" ]; then
             break
         fi
-        echo "  Bad format — expected aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff"
+        echo "  Bad format — expected aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff" >&2
     done
 
     echo
     printf "Bind eth0 to %s? [Y/n] " "$mac"
     read confirm_answer || exit 1
     case "$confirm_answer" in
-        n|N|no|NO) echo "Aborted, no change made."; exit 0 ;;
+        n|N|no|NO) echo "Aborted, no change made."; exit 1 ;;
     esac
 
     echo
@@ -131,53 +123,194 @@ EOF
  Step 1 done.
 ================================================================
 
-The MAC is now stored in /dev/mmcblk1boot0 — survives reboots,
-OTA updates and any future rkdeveloptool re-flash.
+The MAC is now stored in /dev/mmcblk1boot0 — it survives reboots,
+OTA updates, and any future rkdeveloptool re-flash.
 
 What happens next:
-  1. The device must reboot for the new MAC to take effect.
-  2. Your SSH session will drop. The device will get a fresh
-     DHCP lease — find the new IP in your router's DHCP table
-     under MAC:
+  1. The device reboots in 3 seconds.
+  2. Your SSH session will drop. Wait ~90 s, then look for this
+     MAC in your router's DHCP table:
          $mac
-  3. SSH back in. Re-run linxdot-setup to continue with TTN
-     registration and key installation.
+  3. SSH back in at the new IP and run 'linxdot-setup' again to
+     finish TTN registration.
 
 EOF
-
-    if confirm "Reboot now? [Y/n]"; then
-        echo "Rebooting in 3 seconds…"
-        sleep 3
-        reboot
-    else
-        echo "OK — reboot manually when ready (\`reboot\`)."
-    fi
+    sleep 3
+    reboot
 }
 
-phase_b_stub() {
-    cat <<'EOF'
+read_gateway_eui() {
+    # Bootstrap basicstation with a placeholder key so it prints the EUI,
+    # then poll its logs for up to EUI_TIMEOUT seconds. Echoes the EUI on
+    # success (16 hex chars), nothing on timeout.
+    mkdir -p "$(dirname "$TC_KEY")"
+    if [ ! -s "$TC_KEY" ]; then
+        echo placeholder > "$TC_KEY"
+    fi
+    /etc/init.d/S80dockercompose start >/dev/null 2>&1 || true
+
+    i=0
+    while [ "$i" -lt "$EUI_TIMEOUT" ]; do
+        # Extract exactly 16 hex chars after "Gateway EUI:" (handles ANSI
+        # colour codes / trailing whitespace that basicstation may emit).
+        eui=$(docker logs basicstation 2>&1 \
+            | sed -n 's/.*Gateway EUI: *\([0-9A-Fa-f]\{16\}\).*/\1/p' \
+            | head -1)
+        if [ -n "$eui" ]; then
+            printf '%s' "$eui"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+wait_for_muxs() {
+    # Poll basicstation logs for the MUXS handshake message.
+    # Returns 0 on success, 1 on timeout.
+    i=0
+    while [ "$i" -lt "$MUXS_TIMEOUT" ]; do
+        if docker logs basicstation 2>&1 | grep -q "Connected to MUXS"; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+phase_b() {
+    cat <<EOF
 Step 2 of 2: TTN registration and LNS key
 ------------------------------------------
 
-(not yet implemented in this build)
-
-For now, follow the README steps 5 and 6 manually:
-  1. ssh into this device, then start basicstation with a
-     placeholder key to read the Gateway EUI:
-         echo placeholder > /data/basicstation/tc_key.txt
-         /etc/init.d/S80dockercompose start
-         sleep 10
-         docker logs basicstation 2>&1 | grep "Gateway EUI:"
-  2. On https://console.cloud.thethings.network register the
-     gateway with that EUI, generate an LNS API key.
-  3. Replace the placeholder:
-         echo 'NNSXS.your-real-key...' > /data/basicstation/tc_key.txt
-         chmod 600 /data/basicstation/tc_key.txt
-         /etc/init.d/S80dockercompose restart
-
-A future build will automate steps 1–3.
+This step does four things:
+  1. Reads the LoRaWAN Gateway EUI from the SX1302 chip.
+  2. Walks you through registering the gateway in TTN Console.
+  3. Takes the LNS API key from you and stores it on /data.
+  4. Verifies the gateway connects to TTN.
 
 EOF
+
+    printf "Reading Gateway EUI (up to %d s)…\n" "$EUI_TIMEOUT"
+    if ! eui=$(read_gateway_eui) || [ -z "$eui" ]; then
+        cat <<EOF
+
+ERROR: Could not read the Gateway EUI from basicstation logs in
+${EUI_TIMEOUT}s. Inspect the container manually:
+    docker logs basicstation 2>&1 | tail -30
+Re-run 'linxdot-setup' once basicstation is healthy. State left
+at 'mac-bound'.
+
+EOF
+        exit 1
+    fi
+
+    cat <<EOF
+
+  Gateway EUI: $eui
+
+------------------------------------------------------------------
+Register this gateway in your TTN account
+------------------------------------------------------------------
+
+  1. Open https://console.cloud.thethings.network in a browser.
+  2. Pick the cluster you want (eu1 / nam1 / au1 / …). The default
+     in this firmware is eu1; to change, edit /data/docker-compose.yml
+     after this step.
+  3. Click Gateways → "+ Register gateway".
+  4. Paste this Gateway EUI into the form:
+         $eui
+  5. Pick your frequency plan
+     (e.g. "Europe 863-870 MHz (SF9 for RX2)").
+  6. Save the gateway.
+  7. Open the gateway page → API keys → "+ Add API key".
+  8. Tick "Link as Gateway to a Gateway Server for traffic exchange"
+     under Gateway connection.
+  9. Click Create. TTN shows an "NNSXS.…" value ONCE — copy it now.
+
+EOF
+
+    while :; do
+        key=$(ask "Paste the LNS key (NNSXS.…): ")
+        case "$key" in
+            NNSXS.*)
+                if [ "${#key}" -ge 32 ]; then
+                    break
+                fi
+                echo "  That's too short — TTN keys are usually 80+ characters." >&2
+                ;;
+            *)
+                echo "  Bad format — the key must start with 'NNSXS.'" >&2
+                ;;
+        esac
+    done
+
+    printf '%s\n' "$key" > "$TC_KEY"
+    chmod 600 "$TC_KEY"
+    echo
+    echo "Key saved. Restarting basicstation…"
+    /etc/init.d/S80dockercompose restart >/dev/null 2>&1 || true
+
+    printf "Waiting for the TTN handshake (up to %d s)…\n" "$MUXS_TIMEOUT"
+    if ! wait_for_muxs; then
+        cat <<EOF
+
+ERROR: basicstation did not reach 'Connected to MUXS' within
+${MUXS_TIMEOUT}s. See:
+    docker logs basicstation 2>&1 | tail -30
+Common causes: wrong key, gateway not registered yet on TTN,
+wrong region/frequency plan.
+
+State left at 'mac-bound' — fix the issue and re-run linxdot-setup.
+
+EOF
+        exit 1
+    fi
+
+    write_state setup-complete
+
+    cat <<EOF
+
+================================================================
+ Setup complete — your gateway is live on TTN.
+================================================================
+
+  Gateway EUI : $eui
+  Connection  : Connected to MUXS
+
+Verify on the TTN Console: the gateway should show "Connected".
+Send your first uplink to confirm the LoRa side.
+
+You're done. The wizard won't prompt again on this device. To redo
+setup from scratch, remove /data/.setup-state and run linxdot-setup.
+
+EOF
+}
+
+phase_complete() {
+    cat <<EOF
+Setup is complete. Current state:
+
+EOF
+    if [ -s "$TC_KEY" ]; then
+        printf "  TC key      : present (%d bytes)\n" "$(wc -c < "$TC_KEY")"
+    else
+        printf "  TC key      : missing — re-run after \`rm %s\`\n" "$STATE_FILE"
+    fi
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^basicstation$'; then
+        echo "  basicstation: running"
+    else
+        echo "  basicstation: NOT running — try: /etc/init.d/S80dockercompose start"
+    fi
+    if docker logs basicstation 2>&1 | grep -q "Connected to MUXS"; then
+        echo "  TTN          : connected"
+    else
+        echo "  TTN          : not connected — see: docker logs basicstation"
+    fi
+    echo
+    echo "To redo setup from scratch: rm $STATE_FILE && linxdot-setup"
 }
 
 # --- main ---
@@ -191,11 +324,10 @@ case "$state" in
         phase_a
         ;;
     mac-bound)
-        phase_b_stub
+        phase_b
         ;;
     setup-complete)
-        echo "Setup is already complete. Nothing to do."
-        echo "Force-reset with: rm $STATE_FILE && linxdot-setup"
+        phase_complete
         ;;
     *)
         echo "Unknown setup state: $state"

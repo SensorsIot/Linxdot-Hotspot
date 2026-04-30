@@ -44,57 +44,33 @@ sudo rkdeveloptool rd                            # reboot into new firmware
 
 Connect Ethernet and wait ~2 minutes for first boot.
 
-### 3. Find the device and bind the case MAC (one-time)
+### 3. Bind the case MAC
 
-After the first boot, the device announces itself on Ethernet with a known shared setup MAC: **`02:00:5d:01:01:01`**. Look for that entry in your router's DHCP table to get the device's IP, then SSH in and run the setup wizard:
+After the first boot, the device announces itself on Ethernet with a known shared setup MAC: **`02:00:5d:01:01:01`**. Look for that entry in your router's DHCP table to get the device's IP. SSH in and run the setup wizard:
 
 ```bash
 ssh root@<device-ip>     # password: linxdot
-linxdot-setup            # interactive — paste the MAC from the case sticker
+linxdot-setup            # paste the MAC from the case sticker when asked
 ```
 
-The wizard prompts for the MAC printed on the case sticker (your unit's globally-unique IEEE-allocated identity), validates the format, writes it into the eMMC hardware boot partition, and offers to reboot. **Accept the reboot.** After the device comes back, re-discover it in your router's lease table — this time look for your case MAC, not `02:00:5d:01:01:01`. The case MAC then survives every OTA update and any future `rkdeveloptool` re-flash. **You only do this once per device.**
+The wizard validates the MAC, writes it into the eMMC hardware boot partition, and reboots the device. Wait ~90 s, then look up your case MAC in the router's DHCP table to find the new IP. The case MAC is now permanent — it survives reboots, OTA updates, and any future `rkdeveloptool` re-flash.
 
-> ⚠️ **Provision one device at a time.** Because every fresh OpenLinxdot device announces the same setup MAC `02:00:5d:01:01:01`, two simultaneously-fresh devices on one LAN will collide on DHCP. Finish this step on the first device before powering on the next.
+> ⚠️ **Provision one device at a time.** Every fresh OpenLinxdot device announces the same setup MAC `02:00:5d:01:01:01`. Finish step 3 on the first device before powering on the next.
 
-If you skip the wizard the device will keep using the shared setup MAC. That's harmless — TTN identifies your gateway by its EUI, not its MAC — but you lose the unique identity printed on the case.
+### 4. Connect to TTN
 
-### 4. Read the Gateway EUI
-
-SSH back in at the new (case-MAC) IP. The Gateway EUI is burned into the SX1302 concentrator chip and printed by Basics Station at startup. To see it, bootstrap the container with a placeholder key (you'll replace it with the real one in step 6):
+SSH back in at the new (case-MAC) IP and run the wizard again:
 
 ```bash
-ssh root@<new-device-ip>                                   # password: linxdot
-echo placeholder > /data/basicstation/tc_key.txt
-/etc/init.d/S80dockercompose start
-sleep 10
-docker logs basicstation 2>&1 | grep "Gateway EUI:"
-# → Gateway EUI:   0016C001F140B34D
+ssh root@<new-device-ip>
+linxdot-setup
 ```
 
-Write the EUI down — you'll paste it into TTN Console in the next step.
+This time it runs Phase 2: starts basicstation, reads the Gateway EUI off the SX1302 chip, prints it to you, and walks you through TTN Console — register the gateway with that EUI, generate an LNS API key (the `NNSXS.…` value), paste it back into the wizard. The wizard installs the key on `/data`, restarts basicstation, and waits for the `Connected to MUXS` handshake. When you see "Setup complete — your gateway is live on TTN" you're done.
 
-### 5. Register on TTN and get an LNS key
+The key lives on `/data` and survives reboots and OTA updates — you only do this once per device.
 
-On [TTN Console](https://console.cloud.thethings.network):
-
-1. **Gateways → Register gateway**. Enter the Gateway EUI from step 4, pick your frequency plan (e.g. `Europe 863-870 MHz`), register.
-2. Open the gateway's **API keys → Add API key**. Tick **Link as Gateway to a Gateway Server for traffic exchange** under *Gateway connection (also LNS Key)*. Create, copy the `NNSXS.…` value — TTN shows it once.
-
-### 6. Install the real key
-
-```bash
-echo 'NNSXS.your-real-key-here...' > /data/basicstation/tc_key.txt
-chmod 600 /data/basicstation/tc_key.txt
-/etc/init.d/S80dockercompose restart
-sleep 15
-docker logs basicstation 2>&1 | grep -i "Connected to MUXS"
-# → [TCE:VERB] Connected to MUXS.
-```
-
-On TTN Console your gateway should show **Connected**. The key lives on `/data` and survives reboots and OTA updates — you only do this once per device.
-
-### 7. Change region (optional)
+### 5. Change region (optional)
 
 Default is `eu1` (Europe). To switch to another TTN cluster, drop a `/data` override of the compose file (this also makes your customization OTA-safe — runtime edits to `/etc/docker-compose.yml` stack on the overlayfs and can mask future firmware fixes):
 
@@ -141,7 +117,7 @@ If a newer version is available it'll download, verify, install, and reboot — 
 |---|---|
 | Can't enter Loader mode | Make sure the cable supports data (not charge-only). Try a longer button hold (up to 10 s). |
 | No network after boot | Connect Ethernet **before** powering on; check router DHCP leases. |
-| `TC_KEY: NOT CONFIGURED` | Step 6 not done — add the API key to `tc_key.txt` and restart compose. |
+| `TC_KEY: NOT CONFIGURED` | Step 4 didn't complete — re-run `linxdot-setup` to retry TTN registration. |
 | `EUI Source: eth0` instead of `chip` | Concentrator not reset. Power-cycle the device, or run `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start`. |
 | Gateway not showing on TTN | Verify EUI matches registration; `docker logs basicstation` for connection errors. |
 | Repeated `excessive clock drifts (... ppm, threshold 100ppm)` | SX1302 reference oscillator drift. Cosmetic for the LNS link, but degrades RX timing on class-B/C — log a hardware issue if persistent. |
