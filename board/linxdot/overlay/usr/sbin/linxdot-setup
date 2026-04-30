@@ -180,16 +180,198 @@ wait_for_muxs() {
     return 1
 }
 
+# ---- TTN REST helpers -----------------------------------------------------
+# Globals set during phase_b: TTN_API_KEY, TTN_CLUSTER. After every ttn_request
+# call: HTTP_STATUS holds the HTTP code, TTN_RESPONSE holds the body.
+#
+# Note: function output is NOT captured via $() because that would spawn a
+# subshell, and the HTTP_STATUS / TTN_RESPONSE assignments inside it would
+# not propagate back to the caller. Globals stay in the parent shell.
+
+HTTP_STATUS=000
+TTN_RESPONSE=
+LNS_KEY_OVERRIDE=
+
+ttn_request() {
+    # ttn_request METHOD PATH [BODY]
+    method=$1; path=$2; body=${3:-}
+    body_file=$(mktemp)
+    if [ -n "$body" ]; then
+        HTTP_STATUS=$(curl -sS \
+            -X "$method" \
+            -H "Authorization: Bearer ${TTN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            -o "$body_file" \
+            -w '%{http_code}' \
+            "https://${TTN_CLUSTER}.cloud.thethings.network${path}" 2>/dev/null) || HTTP_STATUS=000
+    else
+        HTTP_STATUS=$(curl -sS \
+            -X "$method" \
+            -H "Authorization: Bearer ${TTN_API_KEY}" \
+            -o "$body_file" \
+            -w '%{http_code}' \
+            "https://${TTN_CLUSTER}.cloud.thethings.network${path}" 2>/dev/null) || HTTP_STATUS=000
+    fi
+    TTN_RESPONSE=$(cat "$body_file")
+    rm -f "$body_file"
+}
+
+json_str() {
+    # json_str FIELD < input — extract first matching "FIELD":"VALUE".
+    field=$1
+    tr -d '\n' | sed -n "s|.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*|\\1|p"
+}
+
+eui_to_id() {
+    # 0016C001F140B34D -> linxdot-0016c001f140b34d
+    printf 'linxdot-%s' "$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+}
+
+cluster_freqplan_default() {
+    case "$1" in
+        eu1)  echo "EU_863_870" ;;
+        nam1) echo "US_902_928_FSB_2" ;;
+        au1)  echo "AU_915_928_FSB_2" ;;
+        as1)  echo "AS_923_TTN" ;;
+        *)    echo "EU_863_870" ;;
+    esac
+}
+
+resolve_gateway_conflict() {
+    # Called after POST gateway returns 409. Outcomes:
+    #   1. Our gateway_id exists with matching EUI  → silently reuse $gid.
+    #   2. Our gateway_id exists with different EUI → hard error.
+    #   3. Our gateway_id is free → 409 was due to EUI clash with an
+    #      unknown gateway_id elsewhere → ask operator to paste an LNS
+    #      key for the EXISTING (unknown) gateway, OR delete it and retry.
+    #   4. GET 403 → bootstrap key lacks RIGHT_GATEWAY_INFO → hard error.
+    echo "  conflict — investigating…" >&2
+    msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+    [ -n "$msg" ] && echo "  TTN says: $msg" >&2
+
+    ttn_request GET "/api/v3/gateways/${gid}?field_mask=ids,name"
+    case "$HTTP_STATUS" in
+        200)
+            existing_eui=$(printf '%s' "$TTN_RESPONSE" | json_str eui)
+            existing_eui_uc=$(printf '%s' "$existing_eui" | tr 'a-f' 'A-F')
+            if [ "$existing_eui_uc" = "$eui" ]; then
+                echo "  Gateway '$gid' already registered with this device's EUI — reusing it." >&2
+                return 0
+            fi
+            cat >&2 <<EOF
+  Gateway '$gid' exists on TTN but is bound to a DIFFERENT EUI:
+        existing: $existing_eui
+        ours:     $eui
+  This gateway_id belongs to a different physical device. Re-run
+  linxdot-setup and pick a different gateway_id.
+EOF
+            exit 1
+            ;;
+        403)
+            cat >&2 <<EOF
+  Gateway '$gid' exists on TTN but the API key cannot read it
+  (HTTP 403). Either pick a different gateway_id, or grant the
+  bootstrap key broader gateway rights.
+EOF
+            exit 1
+            ;;
+        404)
+            # Our gid is free; the 409 was an EUI clash under some other
+            # gid we don't know. Operator must find the existing gateway
+            # in TTN Console (or delete it).
+            ask_lns_for_unknown_gateway
+            ;;
+        *)
+            echo "  Unexpected lookup status: HTTP $HTTP_STATUS" >&2
+            echo "  TTN says: $(printf '%s' "$TTN_RESPONSE" | json_str message)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+prompt_for_lns_key() {
+    # prompt_for_lns_key HINT — sets $LNS_KEY_OVERRIDE.
+    while :; do
+        manual_key=$(ask "Paste LNS API key (NNSXS.…)${1:+, $1}: " || true)
+        if [ -z "${manual_key:-}" ]; then
+            echo "Aborted." >&2
+            exit 1
+        fi
+        case "$manual_key" in
+            NNSXS.*)
+                if [ "${#manual_key}" -ge 32 ]; then
+                    LNS_KEY_OVERRIDE=$manual_key
+                    return 0
+                fi
+                echo "  too short — TTN keys are typically 80+ chars." >&2
+                ;;
+            *) echo "  bad format — must start with 'NNSXS.'" >&2 ;;
+        esac
+    done
+}
+
+ask_lns_for_unknown_gateway() {
+    # The EUI is already registered under a gateway_id we don't know.
+    # We can't construct a direct URL, so the operator has to find it.
+    cat >&2 <<EOF
+
+  This LoRaWAN EUI ($eui) is already registered on TTN under some
+  OTHER gateway_id — not '$gid'. The wizard doesn't know which
+  one without scanning your gateway list.
+
+  Two ways forward:
+
+    A) Delete the existing gateway in TTN Console — find the row
+       with EUI $eui, open it, ⋮ menu -> Delete. Then re-run
+       linxdot-setup. Cleanest if you don't need that registration.
+
+    B) Keep the existing gateway and paste an LNS key for it:
+         1. In TTN Console, open the gateway with EUI $eui.
+         2. API keys tab -> "+ Add API key".
+         3. Tick "Link as Gateway to a Gateway Server for traffic
+            exchange". Create.
+         4. Copy the NNSXS.… (shown once) and paste below.
+       (If that EUI isn't in your gateway list, it's registered
+       under another account — ask the owner.)
+
+EOF
+    prompt_for_lns_key "or blank to abort"
+}
+
+ask_lns_for_known_gateway() {
+    # We KNOW $gid is the right gateway (just created or reused via 409),
+    # but auto-create of the LNS key failed (e.g. bootstrap key lacks
+    # RIGHT_GATEWAY_SETTINGS_API_KEYS). Direct the operator to a clickable
+    # URL for THIS gateway.
+    msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+    cat >&2 <<EOF
+
+  Could not auto-create the LNS key for '$gid' (HTTP $HTTP_STATUS):
+      TTN says: ${msg:-(no message)}
+
+  Open this URL in a browser to create one manually:
+
+      https://${TTN_CLUSTER}.cloud.thethings.network/console/gateways/${gid}/api-keys
+
+  Click "+ Add API key", name it (e.g. "openlinxdot-lns"), tick
+  "Link as Gateway to a Gateway Server for traffic exchange",
+  click Create, copy the NNSXS.… value.
+
+EOF
+    prompt_for_lns_key "blank to abort"
+}
+
+# ---- Phase B: TTN auto-provisioning ---------------------------------------
+
 phase_b() {
     cat <<EOF
-Step 2 of 2: TTN registration and LNS key
-------------------------------------------
+Step 2 of 2: Connect to The Things Network
+-------------------------------------------
 
-This step does four things:
-  1. Reads the LoRaWAN Gateway EUI from the SX1302 chip.
-  2. Walks you through registering the gateway in TTN Console.
-  3. Takes the LNS API key from you and stores it on /data.
-  4. Verifies the gateway connects to TTN.
+This step talks to TTN over HTTPS to register your gateway and
+create an LNS key automatically. You only have to paste one TTN
+admin API key — the wizard does the rest.
 
 EOF
 
@@ -212,62 +394,268 @@ EOF
   Gateway EUI: $eui
 
 ------------------------------------------------------------------
-Register this gateway in your TTN account
+One-time setup: create a TTN admin API key
 ------------------------------------------------------------------
 
-  1. Open https://console.cloud.thethings.network in a browser.
-  2. Pick the cluster you want (eu1 / nam1 / au1 / …). The default
-     in this firmware is eu1; to change, edit /data/docker-compose.yml
-     after this step.
-  3. Click Gateways → "+ Register gateway".
-  4. Paste this Gateway EUI into the form:
-         $eui
-  5. Pick your frequency plan
-     (e.g. "Europe 863-870 MHz (SF9 for RX2)").
-  6. Save the gateway.
-  7. Open the gateway page → API keys → "+ Add API key".
-  8. Tick "Link as Gateway to a Gateway Server for traffic exchange"
-     under Gateway connection.
-  9. Click Create. TTN shows an "NNSXS.…" value ONCE — copy it now.
+If you don't have one yet, do this once (re-usable across devices):
+
+  1. Open https://console.cloud.thethings.network and sign in.
+  2. Click your user picture (top right) -> "Personal API keys".
+  3. Click "+ Add API key", give it a name like "OpenLinxdot
+     provisioning".
+  4. Tick AT MINIMUM these rights (under the "Gateways" section):
+       [x] Create gateways under the user account
+     For a smoother experience also tick:
+       [x] View gateway information
+       [x] Edit gateway settings
+     Or just tick the top-level "Manage gateways" to grant all
+     gateway-related rights — easiest, recommended for a personal
+     provisioning key.
+  5. Click Create. TTN shows the NNSXS.… value once — copy it now.
 
 EOF
 
+    # Cluster
+    cat <<'EOF'
+Which TTN cluster do you use?
+  1) eu1   (Europe — default)
+  2) nam1  (North America)
+  3) au1   (Australia)
+  4) as1   (Asia)
+EOF
     while :; do
-        key=$(ask "Paste the LNS key (NNSXS.…): ")
-        case "$key" in
-            NNSXS.*)
-                if [ "${#key}" -ge 32 ]; then
-                    break
-                fi
-                echo "  That's too short — TTN keys are usually 80+ characters." >&2
-                ;;
-            *)
-                echo "  Bad format — the key must start with 'NNSXS.'" >&2
-                ;;
+        printf 'Cluster [1-4, default 1]: ' >&2
+        read choice || exit 1
+        case "${choice:-1}" in
+            1|eu1)  TTN_CLUSTER=eu1;  break ;;
+            2|nam1) TTN_CLUSTER=nam1; break ;;
+            3|au1)  TTN_CLUSTER=au1;  break ;;
+            4|as1)  TTN_CLUSTER=as1;  break ;;
+            *) echo "  invalid choice" >&2 ;;
         esac
     done
 
-    printf '%s\n' "$key" > "$TC_KEY"
+    # User/Org id
+    while :; do
+        owner=$(ask "TTN user or organization ID: ")
+        case "$owner" in
+            [a-z0-9][a-z0-9_-]*) break ;;
+            *) echo "  TTN IDs are lowercase letters/digits, '-' or '_'." >&2 ;;
+        esac
+    done
+    printf 'Is "%s" a user or an organization? [u/o, default u]: ' "$owner" >&2
+    read owner_kind || exit 1
+    case "${owner_kind:-u}" in
+        o|O|org|Org|ORG) owner_path="organizations/${owner}"; collab='"organization_ids":{"organization_id":"'"$owner"'"}' ;;
+        *)              owner_path="users/${owner}";          collab='"user_ids":{"user_id":"'"$owner"'"}' ;;
+    esac
+
+    # Bootstrap API key
+    while :; do
+        TTN_API_KEY=$(ask "Paste your TTN admin API key (NNSXS.…): ")
+        case "$TTN_API_KEY" in
+            NNSXS.*) [ "${#TTN_API_KEY}" -ge 32 ] && break
+                     echo "  too short — real TTN keys are ~80+ chars" >&2 ;;
+            *) echo "  must start with 'NNSXS.'" >&2 ;;
+        esac
+    done
+
+    # Probe the API key against the chosen cluster before we go further.
+    printf "Verifying API key against %s.cloud.thethings.network… " "$TTN_CLUSTER" >&2
+    ttn_request GET /api/v3/auth_info
+    case "$HTTP_STATUS" in
+        200) echo "OK" >&2 ;;
+        000) echo "FAIL" >&2; echo "  could not reach TTN — check internet." >&2; exit 1 ;;
+        400|401|403)
+            echo "FAIL ($HTTP_STATUS)" >&2
+            msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+            echo "  TTN says: ${msg:-(no message)}" >&2
+            echo "  → check the API key is correct and that you picked"      >&2
+            echo "    the right cluster ($TTN_CLUSTER)."                     >&2
+            exit 1
+            ;;
+        *)
+            echo "FAIL ($HTTP_STATUS)" >&2
+            msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+            echo "  TTN says: ${msg:-(no message)}" >&2
+            exit 1
+            ;;
+    esac
+
+    # Pre-flight: verify the API key has the right needed for gateway-create.
+    # Auth-info returns "rights":["RIGHT_FOO","RIGHT_BAR",...]. We require
+    # RIGHT_(USER|ORGANIZATION)_GATEWAYS_CREATE depending on owner_kind, or
+    # RIGHT_ALL as a wildcard. If missing, list the rights the key DOES have
+    # so the user can compare against what's ticked in TTN Console.
+    rights=$(printf '%s' "$TTN_RESPONSE" | tr -d '\n' \
+        | sed -n 's|.*"rights"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*|\1|p' \
+        | tr -d '" ')
+    case "$owner_kind" in
+        o|O|org|Org|ORG) needed=RIGHT_ORGANIZATION_GATEWAYS_CREATE ;;
+        *)               needed=RIGHT_USER_GATEWAYS_CREATE ;;
+    esac
+    case ",$rights," in
+        *,RIGHT_ALL,*|*,"$needed",*)
+            echo "  API key has $needed — good." >&2
+            ;;
+        *)
+            echo
+            cat >&2 <<EOF
+  ERROR: this API key is missing the right needed to create gateways:
+      $needed
+
+  The key currently has these rights:
+EOF
+            if [ -n "$rights" ]; then
+                printf '%s' "$rights" | tr ',' '\n' | sed 's/^/      /' >&2
+            else
+                echo "      (none)" >&2
+            fi
+            cat >&2 <<EOF
+
+  Fix in TTN Console:
+    1. profile (top right) -> Personal API keys
+    2. Click your provisioning key
+    3. Under "Rights", tick:
+         [x] Create gateways under the user account
+       (the internal name for this right is $needed)
+       Easiest: tick the top-level "Manage gateways" / Grant all
+       rights related to gateways.
+    4. Save. Re-run linxdot-setup with the same API key — the
+       change takes effect immediately.
+
+EOF
+            exit 1
+            ;;
+    esac
+
+    # Gateway ID
+    default_id=$(eui_to_id "$eui")
+    while :; do
+        printf 'Gateway ID [default %s]: ' "$default_id" >&2
+        read gid || exit 1
+        gid=${gid:-$default_id}
+        case "$gid" in
+            [a-z][a-z0-9_-]*[a-z0-9]) break ;;
+            *) echo "  start with a lowercase letter, then [a-z0-9_-], end alphanumeric" >&2 ;;
+        esac
+    done
+
+    # Frequency plan
+    default_fp=$(cluster_freqplan_default "$TTN_CLUSTER")
+    printf 'Frequency plan [default %s]: ' "$default_fp" >&2
+    read fp || exit 1
+    fp=${fp:-$default_fp}
+
+    cat <<EOF
+
+  Cluster      : $TTN_CLUSTER
+  Owner        : $owner ($owner_path)
+  Gateway ID   : $gid
+  Gateway EUI  : $eui
+  Freq. plan   : $fp
+
+EOF
+    printf 'Create this gateway on TTN? [Y/n] ' >&2
+    read go || exit 1
+    case "$go" in n|N|no|NO) echo "Aborted." >&2; exit 1 ;; esac
+
+    # ---- Create gateway -------------------------------------------------
+    body=$(printf '{"gateway":{"ids":{"gateway_id":"%s","eui":"%s"},"name":"%s","frequency_plan_id":"%s","enforce_duty_cycle":true,"status_public":true},"collaborator":{%s}}' \
+        "$gid" "$eui" "$gid" "$fp" "$collab")
+    printf "Creating gateway on TTN… " >&2
+    ttn_request POST "/api/v3/${owner_path}/gateways" "$body"
+    case "$HTTP_STATUS" in
+        200|201) echo "OK" >&2 ;;
+        409)    resolve_gateway_conflict ;;
+        401|403)
+            echo "FAIL ($HTTP_STATUS)" >&2
+            msg=$(printf '%s' "$TTN_RESPONSE" | json_str message)
+            echo "  TTN says: ${msg:-(no message)}" >&2
+            cat >&2 <<EOF
+  → The API key authenticates, but doesn't have permission to
+    create gateways under user '$owner'.
+
+  Fix: in TTN Console -> profile -> Personal API keys, edit your
+  API key (or create a new one) and tick under "Gateways":
+       [x] Create gateways under the user account
+  Easiest is to tick the top-level "Manage gateways" which grants
+  all gateway rights at once.
+
+  Note: simply ticking the right on an EXISTING key takes effect
+  immediately — you don't need to re-paste the key. Re-run
+  linxdot-setup with the same key.
+EOF
+            exit 1
+            ;;
+        *)
+            echo "FAIL ($HTTP_STATUS)" >&2
+            echo "  TTN says: $(printf '%s' "$TTN_RESPONSE" | json_str message)"  >&2
+            exit 1
+            ;;
+    esac
+
+    # ---- LNS API key: reuse, auto-create, or prompt for paste ----------
+    if [ -n "$LNS_KEY_OVERRIDE" ]; then
+        echo "Using the LNS key you pasted (skipping auto-create)." >&2
+        lns_key=$LNS_KEY_OVERRIDE
+    else
+        body='{"name":"openlinxdot-lns","rights":["RIGHT_GATEWAY_LINK"]}'
+        printf "Creating LNS key for '%s'… " "$gid" >&2
+        ttn_request POST "/api/v3/gateways/${gid}/api-keys" "$body"
+        case "$HTTP_STATUS" in
+            200|201)
+                echo "OK" >&2
+                lns_key=$(printf '%s' "$TTN_RESPONSE" | json_str key)
+                case "$lns_key" in
+                    NNSXS.*) ;;
+                    *)  echo "  Response missing 'key' — falling back to manual paste." >&2
+                        ask_lns_for_known_gateway
+                        lns_key=$LNS_KEY_OVERRIDE
+                        ;;
+                esac
+                ;;
+            *)
+                echo "FAIL ($HTTP_STATUS)" >&2
+                ask_lns_for_known_gateway
+                lns_key=$LNS_KEY_OVERRIDE
+                ;;
+        esac
+    fi
+
+    # ---- Configure cluster on basicstation -----------------------------
+    if [ "$TTN_CLUSTER" != "eu1" ]; then
+        echo "Configuring basicstation for cluster $TTN_CLUSTER…" >&2
+        if [ ! -f /data/docker-compose.yml ]; then
+            cp /etc/docker-compose.yml /data/docker-compose.yml
+        fi
+        sed -i "s|TTS_REGION:.*|TTS_REGION: ${TTN_CLUSTER}|" /data/docker-compose.yml
+    fi
+
+    # ---- Install LNS key + restart + verify ----------------------------
+    printf '%s\n' "$lns_key" > "$TC_KEY"
     chmod 600 "$TC_KEY"
-    echo
-    echo "Key saved. Restarting basicstation…"
+    echo "LNS key saved. Restarting basicstation…" >&2
     /etc/init.d/S80dockercompose restart >/dev/null 2>&1 || true
 
-    printf "Waiting for the TTN handshake (up to %d s)…\n" "$MUXS_TIMEOUT"
+    printf "Waiting for TTN handshake (up to %d s)…\n" "$MUXS_TIMEOUT" >&2
     if ! wait_for_muxs; then
-        cat <<EOF
+        cat >&2 <<EOF
 
 ERROR: basicstation did not reach 'Connected to MUXS' within
-${MUXS_TIMEOUT}s. See:
+${MUXS_TIMEOUT}s. The gateway IS registered on TTN and the LNS key
+IS installed, so this is usually a region or network issue. See:
     docker logs basicstation 2>&1 | tail -30
-Common causes: wrong key, gateway not registered yet on TTN,
-wrong region/frequency plan.
-
-State left at 'mac-bound' — fix the issue and re-run linxdot-setup.
+State left at 'mac-bound' — re-run linxdot-setup once you've fixed
+the underlying issue (re-run will see the existing gateway + key
+and just retry the handshake).
 
 EOF
         exit 1
     fi
+
+    # forget the bootstrap key — never persisted to disk
+    TTN_API_KEY=
 
     write_state setup-complete
 
@@ -277,7 +665,9 @@ EOF
  Setup complete — your gateway is live on TTN.
 ================================================================
 
+  Gateway ID  : $gid
   Gateway EUI : $eui
+  Cluster     : $TTN_CLUSTER
   Connection  : Connected to MUXS
 
 Verify on the TTN Console: the gateway should show "Connected".
