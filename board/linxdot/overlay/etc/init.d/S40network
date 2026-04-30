@@ -4,9 +4,15 @@
 #
 
 LINK_TIMEOUT=30
-CID_PATH="/sys/class/mmc_host/mmc1/mmc1:0001/cid"
 EMMC_BOOT0="/dev/mmcblk1boot0"
 DATA_MAC="/data/eth0_mac"
+
+# Fixed third-tier fallback MAC. Used on a freshly-flashed device until the
+# operator runs `linxdot-setup` (or `set-eth-mac`) to bind the case sticker
+# MAC. Locally-administered, unicast — not globally unique by design, so
+# every fresh OpenLinxdot device announces this same address. Operators
+# provisioning multiple devices on one LAN must do them one at a time.
+SETUP_MAC="02:00:5d:01:01:01"
 
 # Read a stored MAC from /dev/mmcblk1boot0. The eMMC HW boot partition lives
 # outside the GPT, so MACs written by /usr/sbin/set-eth-mac survive both OTA
@@ -56,23 +62,10 @@ set_mac() {
         echo "S40network: eth0 MAC set to $mac (from $DATA_MAC)"
         return
     fi
-    cid=$(cat "$CID_PATH" 2>/dev/null)
-    if [ -z "$cid" ]; then
-        echo "S40network: no eMMC CID found, using random MAC"
-        return
-    fi
-    hash=$(echo "$cid" | md5sum | cut -c1-12)
-    b1=$(echo "$hash" | cut -c1-2)
-    b2=$(echo "$hash" | cut -c3-4)
-    b3=$(echo "$hash" | cut -c5-6)
-    b4=$(echo "$hash" | cut -c7-8)
-    b5=$(echo "$hash" | cut -c9-10)
-    b6=$(echo "$hash" | cut -c11-12)
-    # Set locally-administered + unicast bits on first byte
-    b1=$(printf "%02x" $(( 0x$b1 & 0xfe | 0x02 )))
-    mac="$b1:$b2:$b3:$b4:$b5:$b6"
-    ip link set dev eth0 address "$mac"
-    echo "S40network: eth0 MAC set to $mac (from eMMC CID)"
+    # Fresh device — assign the fixed setup MAC and ask the operator to
+    # run linxdot-setup. See SETUP_MAC comment above for the rationale.
+    ip link set dev eth0 address "$SETUP_MAC"
+    echo "S40network: eth0 MAC set to $SETUP_MAC (setup fallback — run linxdot-setup)"
 }
 
 start_lo() {

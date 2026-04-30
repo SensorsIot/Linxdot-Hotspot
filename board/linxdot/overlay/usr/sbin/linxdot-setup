@@ -1,0 +1,205 @@
+#!/bin/sh
+# /usr/sbin/linxdot-setup — interactive provisioning wizard.
+#
+# Walks the operator through the steps required to take a freshly-flashed
+# OpenLinxdot device from "boots and gets a fallback IP" to "talking to
+# TTN with a unit-correct MAC".
+#
+# Phase A (this script today): bind the case sticker MAC to eth0.
+# Phase B (TODO): TTN registration + LNS key install + handshake verify.
+#
+# State is tracked in /data/.setup-state, which survives OTA and rollback.
+# Re-running the wizard at any time picks up where it left off.
+
+set -eu
+
+STATE_FILE=/data/.setup-state
+SETUP_MAC="02:00:5d:01:01:01"
+
+read_state() {
+    cat "$STATE_FILE" 2>/dev/null || echo fresh
+}
+
+write_state() {
+    mkdir -p "$(dirname "$STATE_FILE")"
+    printf '%s\n' "$1" > "$STATE_FILE"
+}
+
+print_banner() {
+    cat <<'EOF'
+
+================================================================
+                  OpenLinxdot Setup Wizard
+================================================================
+
+EOF
+}
+
+print_status() {
+    mac=$(cat /sys/class/net/eth0/address 2>/dev/null || echo "(unknown)")
+    ip4=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+    state=$(read_state)
+    printf "  eth0 MAC : %s\n" "$mac"
+    printf "  IP       : %s\n" "${ip4:-(none)}"
+    printf "  State    : %s\n\n" "$state"
+}
+
+ask() {
+    # ask "prompt" — reads a non-empty line from stdin, echoes the value.
+    # Prompt goes to stderr so callers can capture only the answer via $().
+    while :; do
+        printf '%s' "$1" >&2
+        read answer || exit 1
+        [ -n "$answer" ] && { printf '%s' "$answer"; return; }
+    done
+}
+
+confirm() {
+    # confirm "prompt [Y/n]" — yes-default. Returns 0 for yes, 1 for no.
+    printf '%s ' "$1"
+    read answer || return 1
+    case "$answer" in
+        n|N|no|NO) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+normalize_mac() {
+    # Lower-case, accept either ':' or '-' separators, output canonical
+    # aa:bb:cc:dd:ee:ff. Echoes nothing on bad input.
+    in=$(printf '%s' "$1" | tr 'A-F-' 'a-f:')
+    case "$in" in
+        [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f])
+            printf '%s' "$in"
+            ;;
+    esac
+}
+
+phase_a() {
+    cat <<EOF
+Step 1 of 2: Bind the unit's MAC address
+-----------------------------------------
+
+The eth0 interface is currently using the shared setup MAC
+$SETUP_MAC. Every fresh OpenLinxdot device announces this
+same address — useful for finding the device on your router, but
+not the unit's real identity.
+
+Look at the case sticker — it shows a MAC address printed in the
+form aa-bb-cc-dd-ee-ff. That's this unit's globally-unique
+IEEE-allocated MAC (FX Technology's MA-M block). Bind it now and
+the device will keep using it forever after, even across firmware
+updates and re-flashes.
+
+EOF
+
+    while :; do
+        raw=$(ask "Enter the case MAC (or 'skip' to keep the setup MAC): ")
+        case "$raw" in
+            skip|SKIP|s|S)
+                echo
+                echo "OK, keeping the setup MAC. You can run linxdot-setup again later."
+                exit 0
+                ;;
+        esac
+        mac=$(normalize_mac "$raw")
+        if [ -n "$mac" ]; then
+            break
+        fi
+        echo "  Bad format — expected aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff"
+    done
+
+    echo
+    printf "Bind eth0 to %s? [Y/n] " "$mac"
+    read confirm_answer || exit 1
+    case "$confirm_answer" in
+        n|N|no|NO) echo "Aborted, no change made."; exit 0 ;;
+    esac
+
+    echo
+    if ! /usr/sbin/set-eth-mac "$mac"; then
+        echo
+        echo "set-eth-mac failed. Setup state not changed."
+        exit 1
+    fi
+
+    write_state mac-bound
+
+    cat <<EOF
+
+================================================================
+ Step 1 done.
+================================================================
+
+The MAC is now stored in /dev/mmcblk1boot0 — survives reboots,
+OTA updates and any future rkdeveloptool re-flash.
+
+What happens next:
+  1. The device must reboot for the new MAC to take effect.
+  2. Your SSH session will drop. The device will get a fresh
+     DHCP lease — find the new IP in your router's DHCP table
+     under MAC:
+         $mac
+  3. SSH back in. Re-run linxdot-setup to continue with TTN
+     registration and key installation.
+
+EOF
+
+    if confirm "Reboot now? [Y/n]"; then
+        echo "Rebooting in 3 seconds…"
+        sleep 3
+        reboot
+    else
+        echo "OK — reboot manually when ready (\`reboot\`)."
+    fi
+}
+
+phase_b_stub() {
+    cat <<'EOF'
+Step 2 of 2: TTN registration and LNS key
+------------------------------------------
+
+(not yet implemented in this build)
+
+For now, follow the README steps 5 and 6 manually:
+  1. ssh into this device, then start basicstation with a
+     placeholder key to read the Gateway EUI:
+         echo placeholder > /data/basicstation/tc_key.txt
+         /etc/init.d/S80dockercompose start
+         sleep 10
+         docker logs basicstation 2>&1 | grep "Gateway EUI:"
+  2. On https://console.cloud.thethings.network register the
+     gateway with that EUI, generate an LNS API key.
+  3. Replace the placeholder:
+         echo 'NNSXS.your-real-key...' > /data/basicstation/tc_key.txt
+         chmod 600 /data/basicstation/tc_key.txt
+         /etc/init.d/S80dockercompose restart
+
+A future build will automate steps 1–3.
+
+EOF
+}
+
+# --- main ---
+
+print_banner
+print_status
+
+state=$(read_state)
+case "$state" in
+    fresh)
+        phase_a
+        ;;
+    mac-bound)
+        phase_b_stub
+        ;;
+    setup-complete)
+        echo "Setup is already complete. Nothing to do."
+        echo "Force-reset with: rm $STATE_FILE && linxdot-setup"
+        ;;
+    *)
+        echo "Unknown setup state: $state"
+        echo "Reset with: rm $STATE_FILE && linxdot-setup"
+        exit 1
+        ;;
+esac

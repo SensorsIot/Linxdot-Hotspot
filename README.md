@@ -59,17 +59,18 @@ docker logs basicstation 2>&1 | grep "Gateway EUI:"
 
 ### 4. Bind the case MAC (one-time)
 
-The MAC printed on the case sticker is your unit's globally-unique IEEE-allocated identity. Tell the gateway to use it on `eth0`:
+A freshly-flashed device boots with a known shared setup MAC: **`02:00:5d:01:01:01`**. Find that entry in your router's DHCP table to get the device's IP, then SSH in and run the setup wizard:
 
 ```bash
-ssh root@<device-ip>
-set-eth-mac aa:bb:cc:dd:ee:ff   # the MAC from the sticker
-exit
+ssh root@<device-ip>     # password: linxdot
+linxdot-setup            # interactive — pastes the MAC from the sticker
 ```
 
-Setting the MAC bounces `eth0`, so the device gets a fresh DHCP lease (usually a new IP — re-discover via your router's lease table). The MAC lives in the eMMC's hardware boot partition (outside the GPT), so it survives every OTA update and any future `rkdeveloptool` re-flash. **You only do this once per device.**
+The wizard prompts for the MAC printed on the case sticker (your unit's globally-unique IEEE-allocated identity), validates the format, writes it into the eMMC hardware boot partition, and offers to reboot. After the reboot the device gets a fresh DHCP lease at the new MAC — re-discover via your router's lease table. The MAC then survives every OTA update and any future `rkdeveloptool` re-flash. **You only do this once per device.**
 
-If you skip this step the gateway picks a deterministic locally-administered MAC derived from the eMMC chip ID. That's harmless — TTN identifies your gateway by its EUI, not its MAC — but you lose the globally-unique identity printed on the case.
+> ⚠️ **Provision one device at a time.** Because every fresh OpenLinxdot device announces the same setup MAC `02:00:5d:01:01:01`, two simultaneously-fresh devices on one LAN will collide on DHCP. Finish step 4 on the first device before powering on the next.
+
+Skipping this step is harmless — TTN identifies your gateway by its EUI, not its MAC — but the device will keep using the shared setup MAC instead of the unique one printed on the case.
 
 ### 5. Register on TTN and get an LNS key
 
