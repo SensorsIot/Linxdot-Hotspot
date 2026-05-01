@@ -7,9 +7,24 @@
 # On reboot, U-Boot trial-boots the new slot; S98confirm commits if healthy,
 # U-Boot rolls back if it exceeds bootlimit attempts.
 #
-# Refuses to run while the current slot is still in trial mode.
+# Refuses to run while the current slot is still in trial mode (unless
+# --dry-run is passed — that mode is the trial-boot health probe and so
+# must run with upgrade_available=1).
+#
+# Modes:
+#   (none)     full flow — fetch manifest, download .swu, apply, reboot.
+#   --dry-run  prove the OTA path is alive: clock-step + manifest fetch
+#              + parse. Does NOT download the .swu, does NOT touch
+#              U-Boot env. Used by S98confirm as the trial-boot gate.
 
 set -e
+
+DRY_RUN=0
+case "${1:-}" in
+    --dry-run) DRY_RUN=1 ;;
+    "") ;;
+    *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
+esac
 
 MANIFEST_URL="${OTA_MANIFEST_URL:-https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json}"
 PUBKEY="${OTA_PUBKEY:-/etc/swupdate/public.pem}"
@@ -17,9 +32,11 @@ PUBKEY="${OTA_PUBKEY:-/etc/swupdate/public.pem}"
 log() { logger -t ota "$*"; echo "ota: $*"; }
 die() { log "error: $*"; exit 1; }
 
-UPGRADE_AVAILABLE=$(fw_printenv -n upgrade_available 2>/dev/null || echo "0")
-if [ "$UPGRADE_AVAILABLE" = "1" ]; then
-    die "current slot not committed (upgrade_available=1) — wait for S98confirm"
+if [ "$DRY_RUN" -eq 0 ]; then
+    UPGRADE_AVAILABLE=$(fw_printenv -n upgrade_available 2>/dev/null || echo "0")
+    if [ "$UPGRADE_AVAILABLE" = "1" ]; then
+        die "current slot not committed (upgrade_available=1) — wait for S98confirm"
+    fi
 fi
 
 # Step the wall-clock if stale before any HTTPS — the LD1001 has no
@@ -44,6 +61,14 @@ REMOTE_SHA=$(    sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p
 
 CURRENT_VERSION=$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-unknown}")
 log "current=$CURRENT_VERSION remote=$REMOTE_VERSION active=$CURRENT_SLOT target=$TARGET_SLOT"
+
+# Dry-run gate: getting this far means clock + DNS + TLS trust + manifest
+# fetch + parse all worked. That's the entire chain S98confirm needs to
+# verify the trial-booted slot can still receive the next update.
+if [ "$DRY_RUN" -eq 1 ]; then
+    log "dry-run OK — manifest reachable and parseable"
+    exit 0
+fi
 
 if [ "$REMOTE_VERSION" = "$CURRENT_VERSION" ]; then
     log "already up to date"

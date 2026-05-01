@@ -5,9 +5,11 @@
 # wait for the configured health condition, then clear the trial flags.
 # Otherwise U-Boot will roll us back on next reboot.
 #
-# Health condition is configurable via /etc/default/ota (baked into
-# the rootfs) and /data/ota.conf (persistent, overrides the default).
-# See the defaults file for the supported HEALTH_CHECK values.
+# OTA-only firmware: "healthy" means the OTA path itself still works —
+# default route, clock-bootstrap, and ota-check --dry-run reach the
+# upstream manifest. The bar that matters is that this slot can receive
+# the NEXT update. If it can't, we rolled into a soft-brick and U-Boot
+# should put us back on the previous slot.
 
 case "$1" in
     start) ;;
@@ -18,29 +20,27 @@ esac
 
 # Load defaults, then let /data/ota.conf override them.
 HEALTH_CHECK=full
-HEALTH_TIMEOUT=120
+HEALTH_TIMEOUT=300
 [ -r /etc/default/ota ] && . /etc/default/ota
 [ -r /data/ota.conf ]   && . /data/ota.conf
 
 SLOT=$(fw_printenv -n boot_slot 2>/dev/null || echo "?")
 logger -t ota "trial boot of slot $SLOT — health_check=$HEALTH_CHECK timeout=${HEALTH_TIMEOUT}s"
 
+have_route()  { ip route get 1.1.1.1 >/dev/null 2>&1; }
+have_clock()  { /usr/sbin/clock-bootstrap >/dev/null 2>&1; }
+have_upstream() { /usr/sbin/ota-check --dry-run >/dev/null 2>&1; }
+
 is_healthy() {
     case "$HEALTH_CHECK" in
-        always)
-            return 0 ;;
-        never)
-            return 1 ;;
-        minimal)
-            pidof dockerd >/dev/null 2>&1 ;;
-        full|*)
-            pidof dockerd >/dev/null 2>&1 \
-                && docker ps --format '{{.Names}}' 2>/dev/null | grep -q basicstation ;;
+        always)  return 0 ;;
+        never)   return 1 ;;
+        network) have_route && have_clock ;;
+        full|*)  have_route && have_clock && have_upstream ;;
     esac
 }
 
 HEALTHY=0
-# Poll every 5s for up to HEALTH_TIMEOUT seconds.
 polls=$(( HEALTH_TIMEOUT / 5 ))
 [ "$polls" -lt 1 ] && polls=1
 for _ in $(seq 1 "$polls"); do

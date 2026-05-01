@@ -24,21 +24,6 @@ mount_overlay() {
         "$target"
 }
 
-mount_cgroupfs() {
-    # cgroup2 for kernels >= 5.x
-    kernel_maj=$(uname -r | cut -d. -f1)
-    if [ "$kernel_maj" -ge 5 ]; then
-        mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
-    else
-        # Fallback: mount cgroup v1 subsystems
-        mount -t tmpfs cgroup_root /sys/fs/cgroup 2>/dev/null
-        for subsys in cpuset cpu cpuacct blkio memory devices freezer pids; do
-            mkdir -p /sys/fs/cgroup/$subsys
-            mount -t cgroup -o $subsys cgroup /sys/fs/cgroup/$subsys 2>/dev/null
-        done
-    fi
-}
-
 case "$1" in
     start)
         # Ensure /var/run points to /run (tmpfs mounted in S00datapart)
@@ -74,14 +59,6 @@ case "$1" in
             /data/overlay/etc/upper \
             /data/overlay/etc/work \
             /etc
-
-        echo "S01mountall: mounting cgroupfs"
-        mount_cgroupfs
-
-        # If user has a custom docker-compose.yml on /data, use it
-        if [ -f /data/docker-compose.yml ]; then
-            mount -o bind /data/docker-compose.yml /etc/docker-compose.yml
-        fi
         ;;
     stop)
         ;;

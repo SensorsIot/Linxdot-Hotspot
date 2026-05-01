@@ -186,9 +186,9 @@ fi
 
 # ── busybox-only userspace must not call pgrep ─────────────────────────────
 # Buildroot's busybox doesn't ship pgrep (only pidof). A stray `pgrep` in any
-# init script returns 127 silently and flips a healthy state to "failed" —
-# TC-4.4 trial-boot of slot B "FAILED" on rc12 because S98confirm called
-# pgrep dockerd while dockerd was running fine.
+# init script returns 127 silently and can flip a healthy state to "failed".
+# Historical example: TC-4.4 trial-boot of slot B "FAILED" on rc12 because
+# S98confirm called pgrep on a daemon that was running fine.
 for f in "$REPO"/board/linxdot/overlay/etc/init.d/S* \
          "$REPO"/board/linxdot/overlay/usr/sbin/* ; do
     [ -f "$f" ] || continue

@@ -61,8 +61,8 @@ jobs:
           for f in board/linxdot/overlay/etc/init.d/S00datapart \
                    board/linxdot/overlay/etc/init.d/S40network \
                    board/linxdot/overlay/etc/init.d/S50sshd \
-                   board/linxdot/overlay/etc/init.d/S60dockerd \
-                   board/linxdot/overlay/etc/init.d/S80dockercompose \
+                   board/linxdot/overlay/etc/init.d/S98confirm \
+                   board/linxdot/overlay/etc/init.d/S99otacheck \
                    board/linxdot/overlay/etc/fw_env.config \
                    board/linxdot/genimage.cfg \
                    board/linxdot/post-build.sh \
@@ -105,8 +105,6 @@ jobs:
             external.mk \
             Config.in \
             external.desc \
-            package/docker-compose-v1/Config.in \
-            package/docker-compose-v1/docker-compose-v1.mk \
             board/linxdot/uboot/linxdot.fragment \
             board/linxdot/uboot/env.txt \
             board/linxdot/post-build.sh \
@@ -231,8 +229,6 @@ jobs:
             external.mk \
             Config.in \
             external.desc \
-            package/docker-compose-v1/Config.in \
-            package/docker-compose-v1/docker-compose-v1.mk \
             board/linxdot/uboot/linxdot.fragment \
             board/linxdot/uboot/env.txt \
             board/linxdot/post-build.sh \

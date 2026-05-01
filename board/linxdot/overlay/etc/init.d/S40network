@@ -8,10 +8,11 @@ EMMC_BOOT0="/dev/mmcblk1boot0"
 DATA_MAC="/data/eth0_mac"
 
 # Fixed third-tier fallback MAC. Used on a freshly-flashed device until the
-# operator runs `linxdot-setup` (or `set-eth-mac`) to bind the case sticker
-# MAC. Locally-administered, unicast — not globally unique by design, so
-# every fresh OpenLinxdot device announces this same address. Operators
-# provisioning multiple devices on one LAN must do them one at a time.
+# operator runs `set-eth-mac` to bind the case sticker MAC into the eMMC HW
+# boot partition. Locally-administered, unicast — not globally unique by
+# design, so every fresh OpenLinxdot device announces this same address.
+# Operators provisioning multiple devices on one LAN must do them one at a
+# time.
 SETUP_MAC="02:00:5d:01:01:01"
 
 # Read a stored MAC from /dev/mmcblk1boot0. The eMMC HW boot partition lives
@@ -63,9 +64,9 @@ set_mac() {
         return
     fi
     # Fresh device — assign the fixed setup MAC and ask the operator to
-    # run linxdot-setup. See SETUP_MAC comment above for the rationale.
+    # run set-eth-mac. See SETUP_MAC comment above for the rationale.
     ip link set dev eth0 address "$SETUP_MAC"
-    echo "S40network: eth0 MAC set to $SETUP_MAC (setup fallback — run linxdot-setup)"
+    echo "S40network: eth0 MAC set to $SETUP_MAC (setup fallback — run set-eth-mac)"
 }
 
 start_lo() {
@@ -88,11 +89,14 @@ start_eth() {
     done
 
     echo "S40network: eth0 link detected, starting DHCP"
-    dhcpcd -b eth0
+    # Busybox udhcpc — DHCPCD was a docker-stack carry-over; the only client
+    # we ship for OTA-only is busybox's. -b backgrounds; the default lease
+    # script (/usr/share/udhcpc/default.script) wires resolv.conf + route.
+    udhcpc -b -i eth0 -p /var/run/udhcpc.eth0.pid
 }
 
 stop_eth() {
-    dhcpcd -k eth0 2>/dev/null
+    [ -f /var/run/udhcpc.eth0.pid ] && kill "$(cat /var/run/udhcpc.eth0.pid)" 2>/dev/null
     ifconfig eth0 down 2>/dev/null
 }
 

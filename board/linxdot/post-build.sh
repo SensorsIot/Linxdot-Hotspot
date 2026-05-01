@@ -30,27 +30,6 @@ if [ -d "${MODULES_SRC}" ]; then
     cp -a "${MODULES_SRC}/"* "${MODULES_DST}/"
 fi
 
-# ── Install WiFi firmware (local only, not in git repo) ──
-FW_SRC="${BOARD_DIR}/firmware/brcm"
-FW_DST="${TARGET_DIR}/lib/firmware/brcm"
-if [ -d "${FW_SRC}" ]; then
-    echo ">>> Installing WiFi firmware from local directory"
-    mkdir -p "${FW_DST}"
-    cp -a "${FW_SRC}/"* "${FW_DST}/"
-else
-    echo ">>> WiFi firmware not found (${FW_SRC}), skipping"
-fi
-
-# ── Install LoRa concentrator reset script ──
-echo ">>> Installing reset_lgw.sh.linxdot"
-RESET_SRC="${BOARD_DIR}/reset_lgw.sh.linxdot"
-RESET_DST="${TARGET_DIR}/opt/packet_forwarder/tools"
-if [ -f "${RESET_SRC}" ]; then
-    mkdir -p "${RESET_DST}"
-    cp "${RESET_SRC}" "${RESET_DST}/"
-    chmod +x "${RESET_DST}/reset_lgw.sh.linxdot"
-fi
-
 # ── Ensure init scripts are executable ──
 echo ">>> Setting init script permissions"
 chmod +x "${TARGET_DIR}"/etc/init.d/S* 2>/dev/null || true
