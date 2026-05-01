@@ -1,0 +1,100 @@
+#!/bin/sh
+# S99chipeui-watchdog — Layer 4a of the basicstation self-healing stack.
+#
+# By the time this runs, S80dockercompose has already retried reset.sh and
+# the container up to ATTEMPT_MAX times within the current boot. If we still
+# see "EUI Source: eth0" the chip-EUI read failed throughout the boot — a
+# bounded reboot may shake loose whatever transient kept the chip in a bad
+# state (kernel-driver init order, sysfs GPIO claim race, etc.).
+#
+# Safety:
+#   * Only reboots when upgrade_available=0. During an OTA trial, S98confirm
+#     and U-Boot bootcount handle rollback; we stay out of their way so we
+#     don't accidentally race the rollback machinery.
+#   * Bounded by a counter at /data/.chipeui-reboots — capped at REBOOT_MAX
+#     reboots before giving up. The container is left running with the eth0
+#     fallback so an operator can SSH in and diagnose. The counter is cleared
+#     the moment a healthy chip-EUI boot is observed.
+
+case "$1" in
+    start) ;;
+    stop|*) exit 0 ;;
+esac
+
+COUNTER=/data/.chipeui-reboots
+LOG=/var/log/docker-compose.log
+REBOOT_MAX=2
+EUI_WAIT=90      # seconds to wait for the container's "EUI Source:" line
+
+# Mirror to syslog (logread, current boot only) AND to the persistent log
+# file shared with S80dockercompose, so the reboot decision history survives
+# across the very reboots this script triggers.
+log() {
+    logger -t chipeui-watchdog "$*"
+    echo "chipeui-watchdog: $*"
+    echo "$(date -Iseconds) chipeui-watchdog: $*" >> "$LOG" 2>/dev/null || true
+}
+
+# During OTA trial boot, U-Boot + S98confirm own the rollback logic.
+if [ "$(fw_printenv -n upgrade_available 2>/dev/null)" != "0" ]; then
+    log "skipping: OTA trial boot in progress (upgrade_available=1)"
+    exit 0
+fi
+
+# Compute the eth0-fallback EUI64 the container synthesises from the eth0 MAC
+# (EUI-48 -> EUI-64 by inserting FFFE in the middle). The label "EUI Source:"
+# is ambiguous (chip / eth0 / file), so we compare the actual Gateway EUI
+# value against the deterministic eth0-fallback value instead.
+mac=$(cat /sys/class/net/eth0/address 2>/dev/null | tr -d ':' | tr 'a-f' 'A-F')
+if [ "${#mac}" -eq 12 ]; then
+    eth0_eui=$(echo "$mac" | sed 's/^\(......\)\(......\)$/\1FFFE\2/')
+else
+    eth0_eui=""
+fi
+
+# Wait for basicstation to log its Gateway EUI. S80dockercompose's recovery
+# loop may still be finishing its post-up check, so allow time.
+waited=0
+gw_eui=""
+while [ "$waited" -lt "$EUI_WAIT" ]; do
+    gw_eui=$(docker logs basicstation 2>&1 \
+             | grep "Gateway EUI:" | tail -1 \
+             | grep -oE '[0-9A-F]{16}')
+    [ -n "$gw_eui" ] && break
+    sleep 3
+    waited=$((waited + 3))
+done
+
+if [ -z "$gw_eui" ]; then
+    log "uncertain: no Gateway EUI line within ${EUI_WAIT}s — not rebooting"
+    exit 0
+fi
+
+if [ -n "$eth0_eui" ] && [ "$gw_eui" = "$eth0_eui" ]; then
+    log "FAIL Gateway EUI=$gw_eui matches eth0 fallback — chip read failed inside container"
+else
+    log "OK Gateway EUI=$gw_eui (chip EUI in use) — clearing reboot counter"
+    rm -f "$COUNTER"
+    exit 0
+fi
+
+# eth0 fallback confirmed. Check reboot budget.
+count=0
+[ -f "$COUNTER" ] && count=$(cat "$COUNTER" 2>/dev/null || echo 0)
+case "$count" in
+    ''|*[!0-9]*) count=0 ;;
+esac
+
+if [ "$count" -ge "$REBOOT_MAX" ]; then
+    log "ERROR eth0 fallback persists after $REBOOT_MAX recovery reboots — manual intervention required"
+    log "ERROR container left running on eth0 EUI; check /var/log/docker-compose.log and 'docker logs basicstation'"
+    exit 0
+fi
+
+count=$((count + 1))
+echo "$count" > "$COUNTER"
+sync
+log "rebooting to recover chip EUI (recovery boot $count/$REBOOT_MAX)"
+sleep 5
+reboot
+exit 0

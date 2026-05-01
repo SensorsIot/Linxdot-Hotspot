@@ -25,6 +25,22 @@ HEALTH_TIMEOUT=120
 SLOT=$(fw_printenv -n boot_slot 2>/dev/null || echo "?")
 logger -t ota "trial boot of slot $SLOT — health_check=$HEALTH_CHECK timeout=${HEALTH_TIMEOUT}s"
 
+gateway_eui_is_chip() {
+    # Compare actual Gateway EUI against the deterministic eth0 fallback the
+    # entrypoint would synthesise (EUI-48 -> EUI-64 with FFFE inserted). The
+    # "EUI Source:" label can be 'file' for a station.conf reused from a
+    # prior run holding *either* a chip or eth0 EUI, so the value is the
+    # only reliable signal.
+    mac=$(cat /sys/class/net/eth0/address 2>/dev/null | tr -d ':' | tr 'a-f' 'A-F')
+    [ "${#mac}" -eq 12 ] || return 1
+    eth0_eui=$(echo "$mac" | sed 's/^\(......\)\(......\)$/\1FFFE\2/')
+    gw_eui=$(docker logs basicstation 2>&1 \
+             | grep "Gateway EUI:" | tail -1 \
+             | grep -oE '[0-9A-F]{16}')
+    [ -n "$gw_eui" ] || return 1
+    [ "$gw_eui" != "$eth0_eui" ]
+}
+
 is_healthy() {
     case "$HEALTH_CHECK" in
         always)
@@ -33,9 +49,17 @@ is_healthy() {
             return 1 ;;
         minimal)
             pidof dockerd >/dev/null 2>&1 ;;
-        full|*)
+        container)
             pidof dockerd >/dev/null 2>&1 \
                 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q basicstation ;;
+        full|*)
+            # full: dockerd up, basicstation container running, AND container
+            # is using the chip EUI (not the eth0 MAC fallback). An eth0
+            # fallback won't connect to TTN, so we treat it as a failed trial
+            # and let U-Boot roll back to the previous slot.
+            pidof dockerd >/dev/null 2>&1 \
+                && docker ps --format '{{.Names}}' 2>/dev/null | grep -q basicstation \
+                && gateway_eui_is_chip ;;
     esac
 }
 
