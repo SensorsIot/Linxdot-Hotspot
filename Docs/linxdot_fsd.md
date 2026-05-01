@@ -255,12 +255,14 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **FR-3.7** [Should]: `ota-check` shall log all actions and errors to `logger -t ota` (syslog).
 
 #### Rollback (Phase 4)
-- **FR-4.1** [Must]: `S98confirm` shall detect trial-boot state (`upgrade_available=1`) and wait up to 120 s for Basics Station to appear as a running Docker container before committing the slot.
+- **FR-4.1** [Must]: `S98confirm` shall detect trial-boot state (`upgrade_available=1`) and wait up to `HEALTH_TIMEOUT` (default 120 s) for the configured `HEALTH_CHECK` to pass before committing the slot. The default `HEALTH_CHECK=full` requires (a) `dockerd` running, (b) the `basicstation` container running, AND (c) the container's actual `Gateway EUI:` line in `docker logs` to differ from the deterministic eth0 fallback EUI64 (built by inserting `FFFE` between OUI and NIC of the eth0 MAC) — i.e. the chip-EUI read succeeded and the gateway will be able to authenticate to TTN. Configurable values: `full` (default), `container` (pre-v1.0.8 behaviour: just dockerd + container), `minimal` (dockerd only), `always`, `never`. Override path: `/etc/default/ota` (rootfs) → `/data/ota.conf` (persistent).
 - **FR-4.2** [Must]: Commit shall consist of `fw_setenv upgrade_available 0 && fw_setenv bootcount 0`.
 - **FR-4.3** [Must]: U-Boot shall increment `bootcount` on every boot (`CONFIG_BOOTCOUNT_LIMIT`).
 - **FR-4.4** [Must]: U-Boot shall execute `altbootcmd` when `bootcount > bootlimit`.
 - **FR-4.5** [Must]: `altbootcmd` shall flip `boot_slot` **only** when `upgrade_available=1`; when `upgrade_available=0` it shall reset `bootcount` and retry the current slot (preventing spurious rollback on a healthy slot).
 - **FR-4.6** [Must]: After `altbootcmd` fires, the old slot shall boot without further operator intervention.
+- **FR-4.7** [Should]: `S80dockercompose` shall self-heal transient SX1302 chip-EUI read failures within a single boot. Up to `ATTEMPT_MAX` (default 3) cycles of: hardware-reset retry (`reset.sh stop+start` up to `RESET_MAX=3` times, each verified by GPIO readback) → `docker-compose up`/`docker restart` → post-up Gateway-EUI value-check against the eth0 fallback. On all-cycles failure the container is left running (eth0 EUI) for diagnosis and a single `ERROR` line is logged.
+- **FR-4.8** [Should]: `S99chipeui-watchdog` shall reboot the device once when the gateway is committed (`upgrade_available=0`) but persistently using the eth0 fallback EUI, bounded by `/data/.chipeui-reboots` (cap = 2). The watchdog never reboots while `upgrade_available=1` so it cannot race U-Boot rollback. The counter is cleared on every healthy boot.
 
 #### Remote operation
 - **FR-5.1** [Must]: The system shall run Dropbear SSH on port 22 with `root` / `linxdot` credentials (operator is expected to change the password on first access).
@@ -524,7 +526,24 @@ echo TTS_REGION=nam1 > /data/basicstation/region.env   # eu1 / nam1 / au1 / as1
 
 A pre-v1.0.7 device with `/data/docker-compose.yml` still in place is migrated automatically on the first v1.0.7 boot: `S80dockercompose.migrate_region_override` extracts `TTS_REGION`, writes `region.env`, and renames the override to `/data/docker-compose.yml.pre-v1.0.7.bak`. This also clears the pre-v1.0.7 `STATION_RADIOINIT` setting that races against `S80dockercompose`'s host-side reset and intermittently leaves the SX1302 in reset (`Failed to set SX1250_0 in STANDBY_RC mode` on basicstation startup).
 
-### 8.8 Recovery procedures
+### 8.8 Self-healing chain (v1.0.8+)
+
+`S80dockercompose` runs a 4-layer self-heal cycle on every start so a device that comes up with the eth0-fallback EUI can recover unattended:
+
+1. `reset.sh` (Layer 1) drives GPIOs 23/17/15 with `set -eu`, no error swallowing, and reads back values to confirm the chip is powered (gpio23=1, gpio17=1, gpio15=0). Any mismatch → exit non-zero with a `reset.sh: FATAL …` line.
+2. S80 retries reset.sh up to `RESET_MAX=3` times, then runs `docker-compose pull && up -d` (first cycle) or `docker restart basicstation` (later cycles).
+3. After the container starts, S80 grep'es `Gateway EUI:` from `docker logs basicstation` and compares it to the deterministic eth0-fallback EUI64 (eth0 MAC with `FFFE` inserted between OUI and NIC). If they match, the container fell back to eth0 — go around the loop, up to `ATTEMPT_MAX=3` cycles. Otherwise the chip EUI is in use → exit success. The `EUI Source:` *label* is not used for the verdict because it can read `chip` / `eth0` / `file`, where `file` may carry either a chip or a stale eth0 EUI from a previous run.
+4. (a) `S99chipeui-watchdog` runs after S98confirm and, **only if `upgrade_available=0`** (i.e. on a committed boot — never racing OTA-trial rollback), reboots once more if the eth0 fallback persists. Bounded by `/data/.chipeui-reboots` (cap = 2); cleared on every healthy boot. (b) `S98confirm`'s `HEALTH_CHECK=full` (default) value-checks the same `Gateway EUI` so a broken trial OTA gets U-Boot rolled back automatically. New `container` mode preserves pre-v1.0.8 label-only behaviour for devices that prefer to accept eth0-EUI as healthy.
+
+Operator one-liner to read the whole story:
+
+```
+logread | grep -E 'basicstation-init|chipeui-watchdog|ota'
+# ... and persistent across the layer-4a reboot:
+cat /var/log/docker-compose.log
+```
+
+### 8.9 Recovery procedures
 
 | Situation | Action |
 |---|---|
@@ -733,7 +752,7 @@ If you add a runtime gotcha that bit you on hardware, add a static check to `tes
 | Can't enter flash mode | Wrong button / charge-only cable | Check USB enumeration on host (`lsusb`) | Use BT-Pair button + data cable; try longer hold (up to 10 s) |
 | No network after boot | Ethernet unplugged before boot, or DHCP slow | `ip addr show eth0`; check router leases | Plug Ethernet before powering; reboot |
 | `TC_KEY: NOT CONFIGURED` | `tc_key.txt` placeholder still in place | `cat /data/basicstation/tc_key.txt` | Replace file with real key; `/etc/init.d/S80dockercompose restart` |
-| `EUI Source: eth0` (not `chip`) | Concentrator not reset before container start | `docker logs basicstation` | `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start`; `docker-compose restart` |
+| Container starts with `EUI Source: eth0` (Gateway EUI matches eth0 MAC with FFFE inserted) | Container's `util_chip_id` raced the SX1302 settle window at first start | `cat /var/log/docker-compose.log` and `logread \| grep basicstation-init` | v1.0.8+ auto-recovers via `S80dockercompose`'s 3-cycle retry; if persistent, `S99chipeui-watchdog` reboots once. Manual override: `docker rm basicstation; /etc/init.d/S80dockercompose start` to force fresh entrypoint. |
 | Gateway not connecting to TTN | Bad API key, wrong region, firewall | `docker logs basicstation` | Verify key and region; open outbound 443 |
 | OTA never triggers | Device still on Phase 1 single-slot image | `fw_printenv` returns error | Migrate per § 8.4 |
 | OTA triggers but rolls back | New slot fails health gate | Serial console during trial boot: check kernel panic, init errors, Docker failures | Fix underlying issue in firmware, re-release |
@@ -825,6 +844,15 @@ The Phase 4 hardware bring-up peeled four nested SWUpdate-config bugs and two us
 - **CI base hash must cover every file the release job re-applies.** The base-hash list in `.github/workflows/build.yml` gates the cached-rootfs reuse, but the release job re-applies `board/linxdot/overlay/`, `board/linxdot/swupdate/sw-description.tmpl`, `board/linxdot/genimage.cfg`, and `board/linxdot/post-image.sh` on every run — these are NOT in the base hash by design (they're part of the fast release pass), so they pick up changes without a 40-min full rebuild. `swupdate.config` IS in the base hash (it gates Buildroot's `make swupdate` recompile). Drift-debugging takeaway: when a fix to an overlay file appears not to take effect, the release log's "Applying overlay…" line is the source of truth, not the base build.
 - **`swupdate.config` is the source of truth for the swupdate binary.** The buildroot package wrapper passes the kconfig file through `make olddefconfig` and links against host libs gated by `BR2_PACKAGE_*` env vars (HAVE_LIBSSL/HAVE_LIBCONFIG/HAVE_LIBUBOOTENV). Misnamed kconfig symbols are silently dropped; missing BR2 packages disable the corresponding feature even if the swupdate-side symbol is set. The pairing of the two has to be right for the binary to actually have the feature compiled in.
 - **Public key in overlay is not enough — `CONFIG_SIGNED_IMAGES=y` must also be on.** rc16 shipped `public.pem` in the rootfs and CI signed `sw-description`, but `ota-check`'s `swupdate -k /etc/swupdate/public.pem` produced `swupdate: invalid option -- 'k'` and exited 0. swupdate's argument parser only registers `-k` when the verifier is compiled in (`CONFIG_SIGNED_IMAGES=y`); without it `getopt` rejects the flag, the verification path is silently skipped, and any bundle (signed or not) is accepted. Caught by the test suite now: if the overlay public.pem exists, `test_consistency.sh` requires `CONFIG_SIGNED_IMAGES=y` AND `CONFIG_SIGALG_RAWRSA=y` (the algorithm matching CI's `openssl dgst -sha256 -sign` raw RSA-PKCS1v15 output). The reverse implication is also enforced — turning on signing without shipping a public key would brick every bundle on hardware.
+
+**v1.0.7 + v1.0.8 learnings (commits `589de2c`, `d69b126`):**
+
+- **STATION_RADIOINIT double-reset race (v1.0.7).** S80dockercompose's host-side `reset_concentrator()` toggled GPIOs 23/17/15, then ~3s later basicstation forked `STATION_RADIOINIT=/config/reset.sh` *without an arg*, falling into reset.sh's `*)` default case (full power cycle). Two stacked power cycles browned out the SX1250 PLL/TCXO before lgw_start could read STANDBY_RC; SX1302 chip-version readback came back `0x05` (chip held in reset) instead of `0x10` (production silicon). Fix: dropped `STATION_RADIOINIT` from rootfs compose; host-side reset is now the single reset path. Lab confirmed 0/N flap rate → 10/10 successful restarts.
+- **Container-side eth0-EUI fallback when chip-read races settle window (v1.0.8).** xose-perez/basicstation entrypoint runs `/app/gateway_eui` (util_chip_id) immediately at first container start. If the SX1302 hasn't fully settled by then (e.g. `docker-compose pull` stretched the gap between S80's host-side reset and the entrypoint's SPI read), the entrypoint silently falls back to the eth0 MAC, persists the wrong EUI in the container's `/app/config/station.conf`, and *every subsequent restart* reuses it labelled `EUI Source: file`. v1.0.7's single host-side reset was necessary but not sufficient. v1.0.8 adds the 4-layer self-heal stack documented in § 8.8 / FR-4.7 / FR-4.8.
+- **`EUI Source:` label is not the verdict — `Gateway EUI` value is.** The container's three labels are `chip` (just read), `eth0` (fallback), `file` (reused station.conf — which itself can hold either a chip or a stale eth0 EUI). The only reliable signal is the actual `Gateway EUI:` value, compared against the deterministic eth0-fallback EUI64 (eth0 MAC with `FFFE` inserted between OUI and NIC). All three places that decide health (`S80dockercompose:verify_chip_eui`, `S99chipeui-watchdog`, `S98confirm:gateway_eui_is_chip`) use the value comparison. Caught during validation — initial v1.0.8 draft compared the literal string `chip` and would have rejected every healthy post-restart `EUI Source: file` state, making S98 roll back the fix it was trying to land.
+- **busybox sed lacks `\x1b`.** Stripping ANSI colour codes with `sed 's/\x1b\[[0-9;]*m//g'` works on GNU sed but not busybox. The cleaner pattern is `grep -oE '[0-9A-F]{16}'` to extract the 16-char hex EUI from the Gateway EUI line directly — sidesteps the escape character entirely.
+- **Bounded recovery reboots only on committed boots.** `S99chipeui-watchdog` checks `upgrade_available=0` before considering a reboot, so it never races U-Boot trial rollback. The reboot counter at `/data/.chipeui-reboots` survives across the very reboots it triggers (capped at 2) and is cleared on every healthy boot. During an OTA trial, `S98confirm`'s `HEALTH_CHECK=full` (now value-based) is the rollback gate; the watchdog stays out of its way.
+- **Persistent log spans the reboots.** `logger -t basicstation-init|chipeui-watchdog` lands in syslog, but `logread`'s ring buffer is volatile. S80 and S99 also tee their structured single-line entries to `/var/log/docker-compose.log` (overlayed onto `/data`), so the boot history survives the layer-4a reboots and operators can read the whole self-heal story in one file.
 
 ### 12.3 Phase 5 — Curated in-tree DTS (not started)
 
