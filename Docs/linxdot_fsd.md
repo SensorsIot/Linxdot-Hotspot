@@ -234,30 +234,43 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 ### 4.6 Phase 6 — SX1302 hardware bring-up (in progress, branch `test`)
 
-**Scope:** Move all SX1302 / SX1250 bring-up into the basicstation container. The host is uninvolved; `restart: always` plus a power-cycling entrypoint is the self-heal loop.
+**Scope:** Move all SX1302 / SX1250 bring-up into the basicstation container. The host is uninvolved; `restart: always` plus an entrypoint that runs the full datasheet-correct power-up owns the self-heal loop.
 
-**Why container-owned:**
-- SX1250 init via libloragw fails (`Failed to set SX1250_0 in STANDBY_RC mode`, status `0x08`) when the LoRa rail isn't power-cycled before each `lgw_start` attempt — the SX1250 TCXO doesn't reliably restart from a half-init state. The container's templated `reset.sh.legacy` only pulses `RESET_GPIO`; it never drops `POWER_EN_GPIO` to 0 first. So the templated script alone is insufficient for this hardware (commit `589de2c` in `test` branch documents the failure mode).
-- Doing the reset host-side worked for the *first* `lgw_start`, but station crashes on SX1250 init exit the container, docker re-launches via `restart: always`, and the new attempt sees a chip in degraded state (`chip version 0x05` instead of `0x10`) with no fresh reset. So self-heal requires the reset to run on every container start — and the container is the natural owner of "every container start".
+#### Safe power-up sequence
+
+The SX1302 datasheet does not give explicit timing numbers, but standard practice (and empirical confirmation on this hardware — see "failure modes" below) requires:
+
+| Step | RESET (gpio 15) | POWER (gpio 23) | Notes |
+|---|---|---|---|
+| 1. Hold reset, power off | `1` (asserted) | `0` (off) | Drains LDO output caps. Chip is electrically off; reset state machine stays asserted. |
+| 2. Power on, reset still held | `1` (asserted) | `1` (on) | Wait ≥ 1 s. Rails settle, SX1250 TCXO oscillator starts and stabilises. RESET held throughout — the chip's POR machine cannot start running on partial rails. |
+| 3. Release reset, power stable | `0` (released) | `1` (on) | Wait ≥ 100 ms. Chip's internal POR state machine completes from clean defaults; SX1302 → SX1250 SPI bridge initialises correctly. |
+| 4. Start basicstation | — | — | `exec /app/start`. libloragw opens `/dev/spidev0.0`, reads VERSION (0x10), runs `lgw_start`, brings up SX1250 radios. |
+
+**Why this order matters:** if RESET is *released* during a wobbly power ramp (step 2 with RESET=0), the chip's internal logic latches whatever state it sees mid-ramp. The SX1302 core itself usually still answers `VERSION = 0x10` on SPI, but the SX1302→SX1250 bridge ends up in a half-init configuration and `sx1250_setup` reports `Failed to set SX1250_0 in STANDBY_RC mode` (status `0x08`). Holding RESET asserted across the entire power-up forces the POR machine to start from clean defaults the moment power is stable.
+
+**Why this is in the container:**
+- The container's templated `reset.sh.legacy` only pulses `RESET_GPIO`; it never drops the power rail and never holds reset across the rail rise. So the template alone is insufficient for this hardware (`RESET_GPIO=15` in env produces a well-formed pulse but does not satisfy step 2). Commit `589de2c` documents the same symptom from a different angle (double-reset race).
+- station crashes on SX1250 init exit the container; docker `restart: always` re-launches; for self-heal, the full datasheet sequence must re-run on each restart. The natural owner of "every container start" is the container's entrypoint.
 
 **Deliverables:**
-- `docker-compose.yml` `entrypoint:` — 4-line shell that drops GPIO 23 to 0, settles 1 s, raises to 1, settles 1 s, then `exec /app/start`. Inside the privileged container, `/sys/class/gpio` writes go straight to the host kernel's GPIO subsystem.
-- `RESET_GPIO: 15` env var — the templated `reset.sh.legacy` then handles the SX1302 reset *pulse* (which it does correctly); we just needed to add the power cycle that template doesn't do.
+- `docker-compose.yml` `entrypoint:` — runs the four-step sequence above, then `exec /app/start`. With `privileged: true`, sysfs GPIO writes from inside the container reach the host kernel's GPIO subsystem unchanged.
+- `RESET_GPIO: 0` env var — keeps the container's templated `reset.sh` as a no-op so it cannot re-pulse RESET on top of the entrypoint's careful sequencing.
 - `post-build.sh` removes the BR2 default `S60dockerd` (which starts dockerd with no args and ends up using `/var/lib/docker` overlay instead of `/data/docker`); our `S75dockerd` is the canonical one.
 
-**No host-side SX1302 init script.** `S70sx1302-power` and `usr/sbin/sx1302-power` are deleted. The DT marks `vcc3v3-lora` as `regulator-always-on`, so the rail is energised at kernel boot regardless of any userspace action; the container's first run owns the actual power cycle from there.
+**No host-side SX1302 init script.** `usr/sbin/sx1302-reset` and `etc/init.d/S70sx1302` are deleted. The DT marks `vcc3v3-lora` as `regulator-always-on`, so the rail is energised at kernel boot regardless of any userspace action; the container's first run owns the actual power cycle from there.
 
 **Self-heal loop:**
 ```
-container starts → entrypoint power-cycles GPIO 23 → exec /app/start
-  → reset.sh pulses GPIO 15 → chip_id reads VERSION (0x10)
-  → station calls lgw_start → SX1250 init OK → station runs forever
-                            → SX1250 init FAIL → station exits → container exits
-                              → docker restart: always → loop back to "container starts"
+container starts → entrypoint runs the 4-step sequence → exec /app/start
+  → libloragw opens SPI → reads VERSION = 0x10 → lgw_start
+                                                  → SX1250 init OK → station runs forever
+                                                  → SX1250 init FAIL → station exits → container exits
+                                                    → docker restart: always → loop back to entrypoint
 ```
-Bounded only by docker's restart cadence (~5 s per attempt). On genuinely dead hardware the device stays SSH-able and OTA-able while basicstation churns harmlessly.
+Bounded by docker's restart cadence (~5 s per attempt). On genuinely dead hardware the device stays SSH-able and OTA-able while basicstation churns harmlessly.
 
-**Exit criteria:** `docker logs basicstation` shows `Chip ID: <16-hex-char EUI>` with `EUI Source: chip`, then `[lgw_connect:1192] chip version is 0x10 (v1.0)`, then `Connected to MUXS`, then no `lgw_start: failed` error within ~30 s of basicstation start. Once a TC key is configured, the gateway is operational.
+**Exit criteria:** `docker logs basicstation` shows `Chip ID: <16-hex-char EUI>` with `EUI Source: chip`, then `chip version is 0x10 (v1.0)`, then `Connected to MUXS`, then `Concentrator started (Ns Nms)` (the libloragw success line), all within ~30 s of basicstation start. Once a TC key is configured, the gateway is operational. `docker inspect basicstation --format '{{.RestartCount}}'` should stay at 0 (or stabilise at a small number after the initial settle).
 
 ## 5. Functional Requirements
 
@@ -708,7 +721,23 @@ If you add a runtime gotcha that bit you on hardware, add a static check to `tes
 
 ### 10.3 Phase 4 verification
 
-The test plan is **build-time-optimized**: most failure-mode tests are runtime-only (no rebuild) by toggling `HEALTH_CHECK` in `/data/ota.conf` or replacing `/etc/ota/health-probe` via SSH. The CI cost model is:
+#### Acceptance gates (must pass before any release ships)
+
+These tests answer the question "does the deployed device upgrade itself when we publish a new tag?". A failure of any acceptance-gate test blocks the release.
+
+| Test ID | Feature | Procedure | Expected | Build cost |
+|---|---|---|---|---|
+| **TC-4.0** | **Field-workflow OTA** (the one that matters) | Device committed on `vN` with `vN+1` already published. Operator action: **power-cycle the device. Nothing else.** No SSH, no `clock-bootstrap`, no `ota-check`, no overlay surgery. Wait ≤ 5 min, then SSH in to verify. | All of: `VERSION_ID=vN+1`, `boot_slot` flipped, `upgrade_available=0`, `bootcount=0`, `docker logs basicstation` shows `Concentrator started (Ns Nms)`, `Connected to MUXS`, `RestartCount` stable. **No `/data/.s*-reboots` counters present.** Failure of any sub-condition fails the gate. | 1× retag (~2 min) |
+| **TC-4.18** | Multi-step OTA chain | Device on `vN-2`. Publish `vN-1` and `vN` in sequence (or have them pre-published). Power-cycle once. After ≤ 10 min, device should be on `vN`, having transited through `vN-1` autonomously. | Final state on `vN`, basicstation operational, no manual intervention. Validates that compound migrations (e.g. config-file format changes accumulated across versions) don't break. | 2× retag (~4 min) |
+| **TC-4.19** | Overlay hygiene through OTA | Inject a stale shadow before OTA: `cp /etc/init.d/S49ntp /data/overlay/etc/upper/init.d/S49ntp`. Then OTA from `vN` to `vN+1` where the rootfs `S49ntp` differs in behavior. After OTA + reboot, the stale upper masks the new rootfs version. | TC-4.0 must still pass — i.e. either the OTA layer detects/cleans stale upper-layer shadows, or the boot path is robust to operator-side overlay pollution. **As of 2026-05-02 this gate FAILS** — see incident note below. The release process should treat overlay pollution as a known field-deployment risk until a detection mechanism is added. | 1× retag (~2 min) |
+
+**Incident note (2026-05-02, v1.6.0 → v1.7.0):** TC-4.0 was attempted on a device whose `/data/overlay/etc/upper/` had accumulated stale shadows from a prior interactive debugging session (modified `S49ntp`, `S70sx1302`, `docker-compose.yml`, plus a whiteout deletion marker for `S70sx1302`). Power-cycle alone did NOT result in autonomous OTA — the stale `S49ntp` upper masked v1.6.0's bounded-reboot wrapper, so the NTP race went unrecovered, the clock stayed at 2017, TLS rejected the manifest fetch, and the device stayed on `v1.6.0`. Manual recovery required: `rm /data/overlay/etc/upper/init.d/S49ntp`, `mount -o remount /etc`, `clock-bootstrap`, `ota-check`. **The release v1.7.0 itself is functional once installed — the failure is in the autonomous *delivery path* on a previously-modified device.**
+
+#### Diagnostic tests (run when an acceptance gate fails)
+
+These tell you *which part* of the OTA machinery broke if TC-4.0 fails. They're not gates themselves — passing all of them while TC-4.0 fails is still a fail.
+
+The CI cost model for these:
 
 | Change type | CI build cost | Use for |
 |---|---|---|
@@ -717,34 +746,33 @@ The test plan is **build-time-optimized**: most failure-mode tests are runtime-o
 | `defconfig` / package edit | ~30 min cold (full base rebuild) | Avoid if at all possible |
 | Runtime config (`/data/ota.conf`, SSH-edit) | **0 min** (no build) | Most failure-mode tests |
 
-Two releases (`vN` and `vN+1`, same commit) are sufficient for the full happy-path + most failure-path coverage.
-
 | Test ID | Feature | Procedure | Expected | Build cost |
 |---|---|---|---|---|
 | **TC-4.1** | SWU packaging | `sh tests/test_swu_packaging.sh` | CPIO archive built, `sw-description` is first entry, sha256 placeholders substituted | 0 |
 | **TC-4.2** | Image layout | `IMAGE=... sh tests/test_image_layout.sh` | 5 partitions, boot_a at 16 MiB, non-empty SPL region at 32 KiB and env region at 14 MiB | 0 |
 | **TC-4.3** | Static OTA-compatibility | `sh tests/test_consistency.sh` | All cross-file invariants hold (env offsets, selector path, signing symmetry, overlayfs flags, busybox-pgrep) | 0 |
-| **TC-4.4** | Happy-path OTA (`vN → vN+1`) | Device on `vN`, retag same commit as `vN+1` (or push a new release), power-cycle | After ≤ 5 min: `VERSION_ID=vN+1`, `boot_slot` flipped, `upgrade_available=0`, `bootcount=0`, `S60ota` phase 2 logged commit | 1× retag (~2 min) |
+| **TC-4.4** | Happy-path OTA mechanism (operator-assisted) | Device on `vN`, retag same commit as `vN+1` (or push a new release), `ssh root@<device> ota-check` | After ≤ 5 min: `VERSION_ID=vN+1`, `boot_slot` flipped, `upgrade_available=0`, `bootcount=0`, `S60ota` phase 2 logged commit. **This is the SSH-assisted variant of TC-4.0** — passing 4.4 while 4.0 fails means the swupdate machinery works but something earlier (clock, network, overlay) blocks autonomous trigger. | 1× retag (~2 min) |
 | **TC-4.5** | Phase 1 skipped on trial boot | Force trial state without an OTA: `fw_setenv upgrade_available 1; fw_setenv bootcount 0; reboot` | Phase 1 does NOT fetch manifest (no OTA-on-OTA); phase 2 polls health probe; commits within `HEALTH_TIMEOUT` | 0 |
 | **TC-4.6** | Health-check rollback (`HEALTH_CHECK=never`) | `echo HEALTH_CHECK=never > /data/ota.conf; fw_setenv upgrade_available 1; reboot`; reboot 3× more | After exhausting `bootlimit`: U-Boot fires `altbootcmd`, slot flips, `upgrade_available=0`, `bootcount=0`, device on previous version. **Cleanup:** `rm /data/ota.conf` | 0 |
 | **TC-4.7** | Pre-apply failure (network blocked) | Add `127.0.0.1 github.com` to overlay `/etc/hosts` (or block via firewall), run `ota-check` | `ota-check` exits non-zero, `/tmp/update.swu` absent, slot untouched, `upgrade_available=0` | 0 |
 | **TC-4.8** | Health-probe swappability | `printf '#!/bin/sh\nexit 1\n' > /etc/ota/health-probe`; trigger trial state | Probe ignores `HEALTH_CHECK`, S60 phase 2 always fails, bootloader rolls back after `bootlimit` | 0 |
 | **TC-4.9** | Cold-boot clock bootstrap | Power off ≥ 10 min, power on, SSH immediately | `date` initially shows ~2017 (RK3566 RTC default); within ≤ 90 s, jumps to current year; HTTPS manifest fetch succeeds post-jump | 0 (real power cycle) |
-| **TC-4.10** | `/data` persistence across OTA | `echo marker > /data/marker` before OTA | After slot flip: `/data/marker` intact, `/data/.initialized` intact, eMMC-bound MAC still applied to `eth0` | 0 (rides on TC-4.4) |
-| **TC-4.11** | Overlayfs A/B portability | Inspect `/etc` overlay before and after slot flip; check `dmesg` | No `ESTALE` / `failed to verify` entries; `/etc` upper-layer files visible on both slots' lowerdirs (verifies `index=off,xino=off,redirect_dir=off`) | 0 (rides on TC-4.4) |
+| **TC-4.10** | `/data` persistence across OTA | `echo marker > /data/marker` before OTA | After slot flip: `/data/marker` intact, `/data/.initialized` intact, eMMC-bound MAC still applied to `eth0` | 0 (rides on TC-4.0) |
+| **TC-4.11** | Overlayfs A/B portability | Inspect `/etc` overlay before and after slot flip; check `dmesg` | No `ESTALE` / `failed to verify` entries; `/etc` upper-layer files visible on both slots' lowerdirs (verifies `index=off,xino=off,redirect_dir=off`) | 0 (rides on TC-4.0) |
 | **TC-4.12** | Manual trigger | `ssh root@<device> ota-check` | Same flow as boot-time phase 1; foreground; refuses if `upgrade_available=1` | 0 |
 | **TC-4.13** | Manifest reachability probe | `ssh root@<device> ota-check --dry-run` | Exits 0 on healthy network; verifies clock + DNS + TLS + manifest fetch+parse without downloading the `.swu` | 0 |
-| **TC-4.14** | Concurrent `ota-check` race (regression — closed by design) | n/a — root cause removed by S60ota consolidation. The pre-consolidation race depended on `S99otacheck` guaranteeing a 60s-post-boot overlap window with any operator action. With S60ota: phase 1 (full) and phase 2 (`--dry-run`) are mutually exclusive per boot; manual `ota-check` on a trial slot is refused via `upgrade_available=1`; the only theoretical collision is "operator SSHs `ota-check` within phase 1's ~30s window of power-on", and the second invocation would still be refused after phase 1's swupdate runs. No active fix needed. | 0 |
+| **TC-4.14** | Concurrent `ota-check` race (regression — closed by design) | n/a — root cause removed by S60ota consolidation. The pre-consolidation race depended on `S99otacheck` guaranteeing a 60s-post-boot overlap window with any operator action. With S60ota: phase 1 (full) and phase 2 (`--dry-run`) are mutually exclusive per boot; manual `ota-check` on a trial slot is refused via `upgrade_available=1`. No active fix needed. | 0 |
 | **TC-4.15** | Signature required | Tamper bytes in `sw-description` (in-place `dd if=/dev/urandom of=orig.swu bs=1 count=16 seek=200 conv=notrunc`), run `swupdate -c -i orig.swu -k /etc/swupdate/public.pem` | Tampered: `EVP_DigestVerifyFinal failed`, `Image invalid or corrupted`, no slot write. Original (positive control): `SWUPDATE successful` | 0 (in-place corruption, no rebuild) |
-| **TC-4.16** | Full-brick recovery (closed by design) | n/a — covered by union of TC-3.6 (bootloader-level rollback via env manipulation) + TC-4.6 (`HEALTH_CHECK=never`-driven bootcount overflow). U-Boot's `bootcount_env` driver is failure-mode-agnostic: same arc whether userspace dies early (kernel panic) or late (S60ota refuses commit). | n/a | 0 |
+| **TC-4.16** | Full-brick recovery (closed by design) | n/a — covered by union of TC-3.6 (bootloader-level rollback via env manipulation) + TC-4.6 (`HEALTH_CHECK=never`-driven bootcount overflow). U-Boot's `bootcount_env` driver is failure-mode-agnostic. | n/a | 0 |
 
 **Pre-test checklist:**
 - Device reachable on the LAN; root credentials known.
 - Workbench Pi serial console accessible (required for TC-4.16 — SSH won't work if init crashes).
 - `/data/ota.conf` absent on the device (defaults apply at start).
+- `/data/overlay/etc/upper/` and `/data/overlay/usr/upper/` contain only files expected from kernel/bootloader (`dropbear/*` keys, `seedrng/seed.credit`) — anything else is operator-side pollution and biases TC-4.19.
 - `gh release list` shows the expected `vN`, `vN+1`.
 
-**Suggested execution order** (build-cost-minimal): TC-4.1 → 4.2 → 4.3 (CI static checks) → 4.9 (cold boot) → 4.4 (happy path) → 4.10, 4.11 (free observations after 4.4) → 4.6 (rollback drill) → 4.7 (network block) → 4.8 (probe swap) → 4.5 (trial-boot phase split) → 4.12, 4.13 (manual triggers) → 4.14 (race regression) → 4.15, 4.16 (hostile / brick recovery — last). **Total CI build cost for the full plan: ≤ 4 release builds × ~2 min ≈ 8 min.**
+**Suggested execution order**: TC-4.1, 4.2, 4.3 (CI static checks) → **TC-4.0** (the headline) → if TC-4.0 fails, drop down to diagnostics: TC-4.9 (cold-boot clock) → TC-4.13 (manifest reachable) → TC-4.4 (operator-assisted variant) → TC-4.6 (rollback drill) → TC-4.5 (phase split) → 4.7, 4.8, 4.10, 4.11, 4.12 → 4.14, 4.15, 4.16 → TC-4.18 (chain) → TC-4.19 (overlay hygiene). **Total CI build cost for full plan: ≤ 5 release builds × ~2 min ≈ 10 min.**
 
 ### 10.4 Phase 6 verification — SX1302 hardware bring-up
 
@@ -760,8 +788,9 @@ Container owns power + reset; the host runs no SX1302 logic. Tests are no-build 
 | **TC-6.6** | SX1250 radio init succeeds | `docker logs basicstation 2>&1 \| grep -E 'lgw_start\|SX1250_0\|STANDBY_RC'` | No `failed to setup radio 0`, no `Failed to set SX1250_0 in STANDBY_RC mode`. Implies the entrypoint power cycle was effective. | 0 |
 | **TC-6.7** | TTN handshake | `docker logs basicstation 2>&1 \| grep -i muxs` | `Connected to MUXS` appears within ~30 s of basicstation start (TC key required). | 0 |
 | **TC-6.8** | Self-heal on transient failure | Force a single failed start: `docker exec basicstation kill -9 1` (or pull the antenna and let the chip mis-init). Observe `docker logs basicstation` across 1–2 restarts. | Each restart re-runs the entrypoint power cycle (visible in logs), then attempts `lgw_start`. Success on the first or second retry once the transient clears. `docker inspect basicstation \| grep RestartCount` increments. | 0 |
+| **TC-6.9** | End-to-end uplink reaches TTN Application Server | On the device: `docker logs basicstation 2>&1 \| grep -E '\[S2E:VERB\] RX'` to confirm the SX1302 demodulated a real LoRaWAN frame. Then on the TTN console for the configured application: open Live Data (or `mqtt sub` to `v3/<app-id>@<tenant>/devices/+/up`) and look for an `as.up.data.forward` event whose `rx_metadata[]` contains an entry with `gateway_ids.eui` matching this device's chip EUI. | Both conditions met: device-side `S2E:VERB RX <freq> DR<n> SF<n>/BW<n> snr=<n> rssi=<n> ... DevAddr=... FCnt=...` lines appear when a LoRaWAN end-device transmits in range, AND the TTN AS event shows our gateway in `rx_metadata[].gateway_ids.eui` with the same chip EUI. The AS event also contains `decoded_payload` if a payload formatter is configured, proving the full GW→GS→NS→AS chain works. | 0 (assuming a LoRaWAN device is in range) |
 
-**Suggested execution order:** 6.1, 6.2, 6.3 (hygiene checks, instant) → 6.4 (entrypoint actually ran) → 6.5, 6.6 (chip + radio alive) → 6.7 (TTN reachable) → 6.8 (self-heal proof). **Build cost: 0** — every step is observable on any v1.7.0+ device.
+**Suggested execution order:** 6.1, 6.2, 6.3 (hygiene checks, instant) → 6.4 (entrypoint actually ran) → 6.5, 6.6 (chip + radio alive) → 6.7 (TTN reachable) → 6.9 (end-to-end uplink) → 6.8 (self-heal proof — last because it's destructive). **Build cost: 0** — every step is observable on any v1.7.0+ device.
 
 ### 10.5 Traceability Matrix
 
