@@ -64,8 +64,7 @@ jobs:
                    board/linxdot/overlay/etc/init.d/S50sshd \
                    board/linxdot/overlay/etc/init.d/S60ota \
                    board/linxdot/overlay/etc/ota/health-probe \
-                   board/linxdot/overlay/usr/sbin/sx1302-power \
-                   board/linxdot/overlay/usr/sbin/sx1302-check \
+                   board/linxdot/overlay/usr/sbin/sx1302-reset \
                    board/linxdot/overlay/etc/fw_env.config \
                    board/linxdot/genimage.cfg \
                    board/linxdot/post-build.sh \

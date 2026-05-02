@@ -1,0 +1,154 @@
+#!/bin/sh
+# /usr/sbin/sx1302-reset — full bring-up of the SX1302 LoRa concentrator.
+#
+# Sequence:
+#   1. Power rails: drop POWER+EXTRA to 0, settle, raise to 1.
+#   2. Reset pulse: drive RESET high, settle, drive low (release).
+#   3. Settle delay so the chip exits reset and is ready for SPI.
+#   4. L1 chip ID:        read VERSION (0x5610), expect 0x10.
+#   5. L2 register sweep: read several addresses, require ≥2 distinct
+#                         values (catches stuck-bus failures where every
+#                         read returns the same byte).
+#   6. L3 write/readback: write a flipped pattern to a writable register
+#                         (GPIO_DIR at 0x4203), read back, restore.
+#                         Catches "read-only zombie" failure modes where
+#                         the chip echoes hardcoded values but the
+#                         internal state can't be mutated.
+#
+# Exit 0 = chip is electrically powered, SPI bus works in both directions,
+# chip's internal logic is responsive. Exit non-zero = something specific
+# failed; the log line names which step.
+#
+# Adapted from the Linxdot vendor reset.sh (main branch). The OTA-only
+# base owns the chip directly — no docker, no basicstation context.
+
+set -eu
+
+# ── GPIOs (RK3566 sysfs numbering, see Docs/Hardware.md) ────────────────
+POWER_GPIO=23     # primary 3v3 LDO enable
+EXTRA_GPIO=17     # secondary rail (Linxdot dual-rail design)
+RESET_GPIO=15     # chip reset (active high pulse, drop low to release)
+
+# ── SPI ─────────────────────────────────────────────────────────────────
+SPIDEV=${SPIDEV:-/dev/spidev0.0}
+SPI_SPEED=${SPI_SPEED:-1000000}    # 1 MHz; SX1302 supports up to 8 MHz
+
+# ── SX1302 register addresses (sx1302_hal/libloragw/src/sx1302.h) ───────
+REG_VERSION=0x5610      # read-only chip ID, expected 0x10
+REG_GPIO_DIR=0x4203     # writable, used for L3 write/readback
+EXPECTED_VERSION=10     # hex string from od
+
+log()  { echo "sx1302-reset: $*"; logger -t sx1302 "$*" 2>/dev/null || true; }
+fail() { log "FAIL $*"; exit 1; }
+
+# ── GPIO helpers ────────────────────────────────────────────────────────
+export_gpio() {
+    pin=$1
+    if [ ! -d "/sys/class/gpio/gpio$pin" ]; then
+        echo "$pin" > /sys/class/gpio/export 2>/dev/null \
+            || fail "cannot export gpio$pin (sysfs busy or kernel rejected)"
+    fi
+    [ -d "/sys/class/gpio/gpio$pin" ] || fail "gpio$pin missing after export"
+    echo out > "/sys/class/gpio/gpio$pin/direction" \
+        || fail "cannot set gpio$pin direction=out"
+}
+write_gpio()  {
+    echo "$2" > "/sys/class/gpio/gpio$1/value" || fail "cannot write gpio$1=$2"
+}
+verify_gpio() {
+    actual=$(cat "/sys/class/gpio/gpio$1/value") || fail "cannot read gpio$1"
+    [ "$actual" = "$2" ] || fail "gpio$1 readback=$actual, expected $2"
+}
+
+# ── SPI helpers ─────────────────────────────────────────────────────────
+# Emit a single byte (0-255) as raw output. Uses awk so we can compute
+# values numerically without printf-format tricks that break under busybox.
+byte() { awk -v n="$1" 'BEGIN { printf "%c", n }'; }
+
+# Read 1 byte from a 16-bit register address. Echoes 2 hex chars.
+spi_read() {
+    addr=$1
+    ah=$(( (addr >> 8) & 0x7F ))    # high byte, MSB clear (read)
+    al=$(( addr & 0xFF ))
+    rx=$( ( byte 0; byte "$ah"; byte "$al"; byte 0; byte 0 ) \
+          | spi-pipe -d "$SPIDEV" -s "$SPI_SPEED" \
+          | od -An -tx1 | tr -d ' \n')
+    [ "${#rx}" -eq 10 ] || fail "spi_read($addr): got $((${#rx} / 2)) bytes, want 5"
+    echo "${rx#????????}"            # last byte = register value
+}
+
+# Write 1 byte to a 16-bit register address.
+spi_write() {
+    addr=$1; val=$2
+    ah=$(( ((addr >> 8) & 0x7F) | 0x80 ))    # high byte, MSB set (write)
+    al=$(( addr & 0xFF ))
+    ( byte 0; byte "$ah"; byte "$al"; byte 0; byte "$val" ) \
+        | spi-pipe -d "$SPIDEV" -s "$SPI_SPEED" >/dev/null \
+        || fail "spi_write($addr=$val) failed"
+}
+
+# ── 1. Power rails ──────────────────────────────────────────────────────
+log "step 1: power rails"
+export_gpio "$POWER_GPIO"
+export_gpio "$EXTRA_GPIO"
+export_gpio "$RESET_GPIO"
+
+write_gpio "$POWER_GPIO" 0
+write_gpio "$EXTRA_GPIO" 0
+sleep 1
+
+write_gpio "$POWER_GPIO" 1
+write_gpio "$EXTRA_GPIO" 1
+sleep 1
+
+# ── 2. Reset pulse ──────────────────────────────────────────────────────
+log "step 2: reset pulse"
+write_gpio "$RESET_GPIO" 1
+sleep 0.1
+write_gpio "$RESET_GPIO" 0
+sleep 0.1
+
+verify_gpio "$POWER_GPIO" 1
+verify_gpio "$EXTRA_GPIO" 1
+verify_gpio "$RESET_GPIO" 0
+log "GPIO state OK (power=1 extra=1 reset=0)"
+
+# ── 3. Settle ────────────────────────────────────────────────────────────
+sleep 0.1
+[ -c "$SPIDEV" ] || fail "$SPIDEV not present (kernel didn't expose spidev?)"
+command -v spi-pipe >/dev/null 2>&1 || fail "spi-pipe not on PATH"
+
+# ── 4. L1: chip ID ──────────────────────────────────────────────────────
+log "step 4: chip ID at $REG_VERSION"
+ver=$(spi_read $REG_VERSION)
+[ "$ver" = "$EXPECTED_VERSION" ] || fail "version=0x$ver, expected 0x$EXPECTED_VERSION (chip not responding)"
+log "chip ID = 0x$ver (OK)"
+
+# ── 5. L2: register sweep ───────────────────────────────────────────────
+log "step 5: register sweep"
+sweep=""
+for a in 0x5610 0x5611 0x5604 0x5614 0x5615 0x4203; do
+    v=$(spi_read $a)
+    sweep="$sweep $v"
+done
+distinct=$(echo $sweep | tr ' ' '\n' | sort -u | wc -l)
+[ "$distinct" -ge 2 ] \
+    || fail "register sweep returned only one distinct value ($sweep) — bus appears stuck"
+log "sweep =$sweep (distinct=$distinct, OK)"
+
+# ── 6. L3: write + readback on a writable register ──────────────────────
+log "step 6: write/readback on $REG_GPIO_DIR"
+orig_hex=$(spi_read $REG_GPIO_DIR)
+orig=$(( 0x$orig_hex ))
+test_val=$(( orig ^ 0x55 ))                   # XOR ensures different from current
+test_hex=$(printf '%02x' $test_val)
+spi_write $REG_GPIO_DIR $test_val
+got=$(spi_read $REG_GPIO_DIR)
+spi_write $REG_GPIO_DIR $orig                 # restore
+
+[ "$got" = "$test_hex" ] \
+    || fail "write/readback mismatch (orig=0x$orig_hex wrote=0x$test_hex got=0x$got)"
+log "write/readback OK (orig=0x$orig_hex wrote=0x$test_hex got=0x$got, restored)"
+
+log "OK SX1302 fully operational (power + reset + chip ID + sweep + write/readback)"
+exit 0
