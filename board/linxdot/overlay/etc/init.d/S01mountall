@@ -59,6 +59,15 @@ case "$1" in
             /data/overlay/etc/upper \
             /data/overlay/etc/work \
             /etc
+
+        # Mount the cgroup hierarchy that dockerd requires. cgroupfs-mount
+        # (Buildroot package) walks /proc/cgroups and creates an entry
+        # under /sys/fs/cgroup for each enabled controller. Without this
+        # dockerd refuses to start with "the Docker daemon needs cgroups".
+        if [ -x /usr/bin/cgroupfs-mount ]; then
+            /usr/bin/cgroupfs-mount 2>/dev/null || \
+                echo "S01mountall: cgroupfs-mount returned non-zero (continuing)"
+        fi
         ;;
     stop)
         ;;

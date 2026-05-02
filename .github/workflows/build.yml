@@ -63,6 +63,9 @@ jobs:
                    board/linxdot/overlay/etc/init.d/S50sshd \
                    board/linxdot/overlay/etc/init.d/S60ota \
                    board/linxdot/overlay/etc/init.d/S70sx1302 \
+                   board/linxdot/overlay/etc/init.d/S75dockerd \
+                   board/linxdot/overlay/etc/init.d/S80basicstation \
+                   board/linxdot/overlay/etc/docker-compose.yml \
                    board/linxdot/overlay/etc/ota/health-probe \
                    board/linxdot/overlay/usr/sbin/sx1302-reset \
                    board/linxdot/overlay/etc/fw_env.config \
@@ -107,6 +110,8 @@ jobs:
             external.mk \
             Config.in \
             external.desc \
+            package/docker-compose-v1/Config.in \
+            package/docker-compose-v1/docker-compose-v1.mk \
             board/linxdot/uboot/linxdot.fragment \
             board/linxdot/uboot/env.txt \
             board/linxdot/post-build.sh \
@@ -231,6 +236,8 @@ jobs:
             external.mk \
             Config.in \
             external.desc \
+            package/docker-compose-v1/Config.in \
+            package/docker-compose-v1/docker-compose-v1.mk \
             board/linxdot/uboot/linxdot.fragment \
             board/linxdot/uboot/env.txt \
             board/linxdot/post-build.sh \

@@ -93,6 +93,15 @@ BR2_PACKAGE_SWUPDATE_CONFIG="$(BR2_EXTERNAL_LINXDOT_PATH)/board/linxdot/swupdate
 BR2_PACKAGE_LIBCURL=y
 BR2_PACKAGE_LIBCURL_CURL=y
 
+# Packages — Docker (host basicstation container only; no other workloads)
+BR2_PACKAGE_DOCKER_ENGINE=y
+BR2_PACKAGE_DOCKER_ENGINE_EXPERIMENTAL=y
+BR2_PACKAGE_DOCKER_CLI=y
+BR2_PACKAGE_DOCKER_COMPOSE_V1=y
+BR2_PACKAGE_IPTABLES=y
+BR2_PACKAGE_BRIDGE_UTILS=y
+BR2_PACKAGE_CGROUPFS_MOUNT=y
+
 # Packages — SX1302 hardware bring-up
 # spi-tools provides spi-pipe for /dev/spidev0.0 transactions; used by
 # /usr/sbin/sx1302-check to read the SX1302 version register (0x5610).

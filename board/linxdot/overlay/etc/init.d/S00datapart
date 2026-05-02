@@ -66,6 +66,11 @@ case "$1" in
             mkdir -p /data/overlay/etc/upper /data/overlay/etc/work
             mkdir -p /data/etc
 
+            # Docker storage + basicstation config volume (referenced by
+            # /etc/docker-compose.yml). The container needs both to exist
+            # before dockerd starts.
+            mkdir -p /data/docker /data/basicstation
+
             touch /data/.initialized
             sync
         fi
