@@ -90,9 +90,30 @@ start_eth() {
 
     echo "S40network: eth0 link detected, starting DHCP"
     # Busybox udhcpc — DHCPCD was a docker-stack carry-over; the only client
-    # we ship for OTA-only is busybox's. -b backgrounds; the default lease
-    # script (/usr/share/udhcpc/default.script) wires resolv.conf + route.
+    # we ship for OTA-only is busybox's. -b backgrounds the daemon; the
+    # default lease script (/usr/share/udhcpc/default.script) wires
+    # resolv.conf + route on `bound`.
     udhcpc -b -i eth0 -p /var/run/udhcpc.eth0.pid
+
+    # Wait for the lease to actually arrive before returning. udhcpc -b
+    # forks immediately whether or not the negotiation has finished, so
+    # without this poll S49ntp races the lease — clock-bootstrap then
+    # tries to resolve pool.ntp.org before /etc/resolv.conf is populated
+    # (or before the default route is installed), ntpd exits in <1 s with
+    # no sample, the clock stays in 2017, S60ota's HTTPS manifest fetch
+    # fails cert validation, and the device sits parked on the old
+    # version until next boot. Reproducible race; observed on v1.2.0.
+    echo "S40network: waiting for DHCP lease (default route)"
+    count=0
+    while ! ip route get 1.1.1.1 >/dev/null 2>&1; do
+        sleep 1
+        count=$((count + 1))
+        if [ $count -ge 30 ]; then
+            echo "S40network: no default route after 30 s — continuing without"
+            return 0
+        fi
+    done
+    echo "S40network: default route up (took ${count}s)"
 }
 
 stop_eth() {
