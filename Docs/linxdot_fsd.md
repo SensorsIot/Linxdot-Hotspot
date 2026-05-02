@@ -60,7 +60,7 @@ Out of scope:
 - **Must** — mandatory; non-negotiable for compliance.
 - **Should** — recommended; deviations require justification.
 - **May** — optional.
-- Code/file references use backticks: `board/linxdot/overlay/etc/init.d/S99otacheck`.
+- Code/file references use backticks: `board/linxdot/overlay/etc/init.d/S60ota`.
 - Filesystem paths starting with `/` refer to the on-device filesystem; paths without are repo-relative.
 - Section cross-references use the `§ N.X` form. References preceded by "runbook" point to `Docs/phase3_hardware_validation.md`, not this document.
 
@@ -101,9 +101,11 @@ OpenLinxdot is a custom Buildroot-based firmware that turns a **Linxdot LD1001**
 **High-level flow:**
 ```
 BootROM → idbloader (SPL + DDR init) → TF-A BL31 → U-Boot → boot.scr
-  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S80dockercompose..S98confirm..S99otacheck
-  → dockerd → docker-compose → basicstation → WebSocket TLS → TTN LNS
+  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S49ntp..S50sshd..S60ota..[S70<app>]
+  → application → external service (TTN LNS / etc.)
 ```
+S60ota is the consolidated OTA hook (acquire + commit). Application services
+slot in at S70+; the OTA layer is application-agnostic.
 
 ## 3. System Architecture
 
@@ -117,9 +119,9 @@ BootROM → idbloader (SPL + DDR init) → TF-A BL31 → U-Boot → boot.scr
 | **Overlayfs** | Preserves writes to `/usr`, `/var/log`, `/var/lib`, `/etc` on the read-only rootfs, backed by `/data`. |
 | **Docker engine** | Runs exactly one container: `xoseperez/basicstation`. |
 | **Basics Station** | LoRaWAN packet forwarder, connects to TTN via WebSocket+TLS. |
-| **OTA agent** (Phase 4) | `ota-check` CLI + `S99otacheck` init hook. Fetches GitHub Release manifest, downloads `.swu`, hands to SWUpdate. |
+| **OTA agent** (Phase 4) | `ota-check` CLI + `S60ota` init hook (single script, two phases). Phase 1 (committed slot, synchronous): fetch manifest, compare version, download `.swu`, hand to SWUpdate, reboot. Phase 2 (trial slot, backgrounded): poll `/etc/ota/health-probe`; on healthy, clear trial flags. |
 | **SWUpdate** (Phase 4) | Writes inactive A/B slot, sets U-Boot env flags for trial boot. |
-| **Confirm gate** (Phase 4) | `S98confirm` waits for Basics Station to reach TTN, then clears trial flags; U-Boot otherwise rolls back. |
+| **Health probe** (Phase 4) | `/etc/ota/health-probe` — swappable executable, exit `0` = commit, non-zero = not yet. The OTA layer is application-agnostic; application packages overwrite this file with their own probe. The OTA-only base ships a default that checks route + clock-bootstrap + manifest reachability. |
 
 ### 3.2 Hardware / Platform Architecture
 
@@ -167,7 +169,10 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 4. U-Boot's compiled bootcmd picks partition 1 or 3 from `${boot_slot}`, loads `boot.scr`.
 5. `boot.scr` loads `Image` + `rk3566-linxdot.dtb` from the same partition, sets `root=/dev/mmcblk0p2` or `p4`, `booti`.
 6. Kernel → BusyBox init → services.
-7. If `upgrade_available=1`, `S98confirm` waits for Basics Station to reach TTN, then clears flags.
+7. `S60ota` runs early in init.d ordering — *before* the application:
+   - Phase 1 (committed slot): `ota-check` synchronously fetches the manifest. If a newer image exists, it downloads, applies via SWUpdate, sets `upgrade_available=1`, flips `boot_slot`, and reboots — phase 2 never runs on this slot.
+   - Phase 2 (trial slot, `upgrade_available=1`): forks a background loop that polls `/etc/ota/health-probe` for up to `HEALTH_TIMEOUT` seconds. On exit-0, clears trial flags (`upgrade_available=0`, `bootcount=0`).
+   - Phase 1 and 2 are mutually exclusive: a trial boot must not OTA on top of an unconfirmed slot.
 8. If boot attempts exceed `bootlimit` without clearing flags, U-Boot runs `altbootcmd` → slot flips, device boots old slot.
 
 ## 4. Implementation Phases
@@ -214,10 +219,10 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 **Deliverables:**
 - SWUpdate enabled with signature verification against `/etc/swupdate/public.pem`.
 - `sw-description` template declaring `target-A` / `target-B` selections (writes to the inactive slot, sets `boot_slot` + `upgrade_available=1`).
-- `/usr/sbin/ota-check` CLI: fetch manifest, compare version, download `.swu`, invoke SWUpdate, reboot.
-- `S99otacheck` boot-time hook (runs 60 s post-boot in background).
-- `S98confirm` health gate.
-- CI extensions: produce signed `.swu`, emit `manifest.json` with `{ version, url, sha256 }`, upload alongside factory image.
+- `/usr/sbin/ota-check` CLI: fetch manifest, compare version, download `.swu`, invoke SWUpdate, reboot. Supports `--dry-run` (manifest reachability check only, used by the default health probe).
+- `S60ota` boot-time hook — single script, two mutually-exclusive phases (acquire on committed slots; commit on trial slots, backgrounded so init can continue to the application).
+- `/etc/ota/health-probe` — swappable application-defined probe (exit-code contract). Default ships with the OTA layer; application packages overwrite it.
+- CI extensions: produce signed `.swu`, emit `manifest.json` with `{ version, url, sha256, size }`, upload alongside factory image.
 
 **Exit criteria:** Tagged release on GitHub is picked up by a deployed device within one boot cycle; healthy update commits, broken update rolls back without human intervention.
 
@@ -246,7 +251,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **FR-2.5** [Must]: Before any TLS-validating service runs (basicstation's WSS to TTN, `ota-check`'s HTTPS fetch from GitHub) the system shall step the wall-clock to a sane value via NTP. The step is performed by `/usr/sbin/clock-bootstrap` (idempotent: no-op if `date +%Y >= 2024`, otherwise runs `ntpd -gq <server>` against `pool.ntp.org` / `time.cloudflare.com` / `time.google.com` with a 30 s per-server watchdog). At boot it is invoked from `S49ntp` *before* the long-running disciplining `ntpd` binds udp/123 (only one ntpd can hold the port; the helper detects a running ntpd at runtime and stops/restarts it around its own step). `ota-check` calls it defensively for ad-hoc runs. This is required because the LD1001 has no battery-backed RTC (constraint C-7). `S49ntp` also drops a 0-byte `/data/overlay/etc/upper/ntp.conf` if present — the empty placeholder shipped by the Buildroot ntp package can persist in the writable overlay and silently mask the rootfs config.
 
 #### Over-the-Air updates (Phase 4)
-- **FR-3.1** [Must]: The system shall poll `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` 60 seconds after boot and compare the `version` field against `/etc/os-release VERSION_ID`.
+- **FR-3.1** [Must]: The system shall poll `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` synchronously during boot (`S60ota` phase 1, before the application starts) and compare the `version` field against `/etc/os-release VERSION_ID`. Polling is once per boot only; there is no periodic poll. Acquisition is skipped on a trial boot (`upgrade_available=1`) to prevent OTA-on-OTA stacking.
 - **FR-3.2** [Must]: The operator shall be able to trigger an update check manually via `ssh root@<device> ota-check` without rebooting.
 - **FR-3.3** [Must]: When a newer version is available the system shall download the `.swu` bundle, verify its sha256 against the manifest, and apply it to the currently-inactive A/B slot via SWUpdate.
 - **FR-3.4** [Must]: After staging an update the system shall set `boot_slot=<inactive>`, `upgrade_available=1`, `bootcount=0` in the U-Boot environment and reboot.
@@ -255,7 +260,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **FR-3.7** [Should]: `ota-check` shall log all actions and errors to `logger -t ota` (syslog).
 
 #### Rollback (Phase 4)
-- **FR-4.1** [Must]: `S98confirm` shall detect trial-boot state (`upgrade_available=1`) and wait up to 120 s for Basics Station to appear as a running Docker container before committing the slot.
+- **FR-4.1** [Must]: On a trial boot (`upgrade_available=1`), `S60ota` phase 2 shall poll `/etc/ota/health-probe` every 5 s for up to `HEALTH_TIMEOUT` seconds (default 300). On the first exit-0 it commits the slot. The probe is a swappable executable owned by the application package — the OTA layer never imports application logic. The default probe shipped with the OTA-only base honors a `HEALTH_CHECK` selector in `/etc/default/ota` (overridable via `/data/ota.conf`) with values `full` (route + clock-bootstrap + manifest reachability), `network` (route + clock only), `always` (instant pass), `never` (instant fail — for rollback drills).
 - **FR-4.2** [Must]: Commit shall consist of `fw_setenv upgrade_available 0 && fw_setenv bootcount 0`.
 - **FR-4.3** [Must]: U-Boot shall increment `bootcount` on every boot (`CONFIG_BOOTCOUNT_LIMIT`).
 - **FR-4.4** [Must]: U-Boot shall execute `altbootcmd` when `bootcount > bootlimit`.
@@ -300,7 +305,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 | Mainline U-Boot lacks a Linxdot-specific peripheral quirk | Medium | High | Start from `quartz64-a-rk3566_defconfig`, iterate; keep vendor U-Boot blob as fallback until Phase 3 validated on hardware. |
 | OTA bundle signature mismatch bricks all deployed devices after key rotation | Low | High | Ship new public key in firmware image *before* rotating the private key; rotation procedure documented in § 8.5. |
 | Partial `.swu` download corrupts slot | Low | Low | SWUpdate verifies sha256 of each image before committing; `upgrade_available` is not set on failed download. |
-| `S98confirm` health gate false-negative (Basics Station slow to connect) | Medium | Medium | 120 s wait; can be tuned in the init script. Worst-case outcome is a rollback to the prior known-good slot, which is recoverable. |
+| `S60ota` phase-2 health-probe false-negative (slow application start, transient network) | Medium | Medium | `HEALTH_TIMEOUT=300 s` default; tunable per-device via `/data/ota.conf`. Worst-case outcome is a rollback to the prior known-good slot, which is recoverable. Application packages can ship their own `/etc/ota/health-probe` with tighter or looser checks as needed. |
 | Private signing key leaks | Low | High | Key stored only in GitHub Actions secret (`OTA_SIGNING_KEY`). Rotation procedure in § 8.5. Devices only trust the baked-in public key. |
 | `host-tools.tar.gz` bundles runner libc via unfiltered `ldd` (base-build job) and the release job `sudo cp`s it into `/usr/local/lib/` + runs `ldconfig` | High (already observed 2026-04-23) | High | genimage's only non-system dep is `libconfuse2`; filter `ldd` to non-system libs **or** drop the bundle and `apt-get install libconfuse2` on the release runner. Never replay the release install step inside the devcontainer — Debian trixie's `/bin/sh` will SIGFPE against an Ubuntu 22.04 libc (`GLIBC_2.38 not found`). See § 8.2. |
 | EL3 is now a Rockchip vendor binary (`rk3568_bl31_v1.43.elf` from rkbin) instead of TF-A v2.12.0 built from source | Medium | Medium | Accepted for Phase 3 to unblock vendor 5.15 kernel (see §4.3). Pin the exact rkbin file path in defconfig + Buildroot snapshot. No CVE response channel; mitigation is to revisit once Phase 2 (mainline kernel) removes the dependency on Rockchip-vendor SIP SMCs and source TF-A can be re-adopted. |
@@ -512,7 +517,7 @@ shred -u ota-signing.key
 ssh root@<device> ota-check
 ```
 
-Same logic as boot-time `S99otacheck` — no reboot required. Refuses to run if `upgrade_available=1` (current slot not yet committed).
+Same logic as boot-time `S60ota` phase 1 — no reboot required. Refuses to run if `upgrade_available=1` (current slot not yet committed). `ota-check --dry-run` is also accepted; it stops after manifest fetch+parse and is what the default health probe uses to validate the OTA path during phase 2.
 
 ### 8.7 Region change
 
@@ -529,7 +534,7 @@ A pre-v1.0.7 device with `/data/docker-compose.yml` still in place is migrated a
 | Situation | Action |
 |---|---|
 | Device boots old slot unexpectedly | Check `fw_printenv boot_slot bootcount upgrade_available`. If `boot_slot` differs from last known + logs show OTA attempt, rollback fired — diagnose via `logger -t ota` entries. |
-| `upgrade_available=1` stuck after successful TTN connection | `S98confirm` didn't run or crashed. Manually: `fw_setenv upgrade_available 0; fw_setenv bootcount 0`. |
+| `upgrade_available=1` stuck after the application is healthy | `/etc/ota/health-probe` returned non-zero or `S60ota` phase 2 was killed before it ran. Diagnose: `cat /etc/ota/health-probe; /etc/ota/health-probe; echo $?`. If the probe exits 0 manually, force a commit: `fw_setenv upgrade_available 0; fw_setenv bootcount 0`. |
 | Neither slot boots | U-Boot recovery. If U-Boot is healthy, interrupt with Ctrl-C at serial, `rockusb 0 mmc 0`, reflash via `rkdeveloptool`. |
 | Corrupt U-Boot env | Env is redundant (primary + backup). If both corrupted, default env is used (device still boots slot A but lacks rollback state). `fw_setenv` writes fresh values on next boot. |
 | `rkdeveloptool` needed but case is sealed | Enter download mode from serial: Ctrl-C to U-Boot, `rockusb 0 mmc 0` (requires pre-routed USB cable per § 8.3 Option B). |
@@ -544,7 +549,7 @@ Three buckets, one source of truth. Every file you touch falls into exactly one 
 
 | Bucket | What's in it | OTA behaviour |
 |---|---|---|
-| **A/B-replaced** | Kernel `Image`, DTB, modules, all of `/usr`, the rootfs overlay (`/etc`, `/lib`, `/sbin`, `/bin` defaults), shipped configs, init scripts, `ota-check`, `S98confirm`, SWUpdate's `swupdate.config` baked into the binary, `sw-description.tmpl`, `os-release`. | Written to the inactive A/B slot on every successful OTA, swapped in at the next boot. **The unit of OTA delivery.** |
+| **A/B-replaced** | Kernel `Image`, DTB, modules, all of `/usr`, the rootfs overlay (`/etc`, `/lib`, `/sbin`, `/bin` defaults), shipped configs, init scripts, `ota-check`, `S60ota`, `/etc/ota/health-probe`, SWUpdate's `swupdate.config` baked into the binary, `sw-description.tmpl`, `os-release`. | Written to the inactive A/B slot on every successful OTA, swapped in at the next boot. **The unit of OTA delivery.** |
 | **Persistent** | `/data` (partition 5): TTN key, Docker images & metadata, `/data/overlay/{usr,etc,var_lib}/upper` (overlayfs writes), user-supplied `/data/docker-compose.yml`, anything else under `/data`. | Untouched by SWUpdate. Survives every update *and* every rollback. |
 | **Frozen at factory flash** | `u-boot-rockchip.bin` (idbloader + SPL + FIT + BL31 + U-Boot proper), the U-Boot env *defaults* compiled into the binary, the partition layout (`genimage.cfg` regions and offsets), the env-partition offsets in `linxdot.fragment`. | Never updated by OTA. Changing any of them in the source tree means every deployed device needs a one-time `rkdeveloptool` reflash to receive the change (constraint **C-4**). |
 
@@ -556,7 +561,7 @@ The corollary is simple: **if your change must reach already-deployed devices wi
 |---|---|---|
 | Default config file (every device gets this baseline) | `board/linxdot/overlay/<path>` | Replaced on every OTA — your default ships in the new rootfs. |
 | Operator-customizable config | Document a `/data/<...>` override + a bind-mount or symlink in the init script (see `S01mountall`'s `/data/docker-compose.yml` pattern) | Operator's override survives OTA; firmware default is always the latest from the rootfs. |
-| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S49ntp` → `S50sshd` → `S60dockerd` → `S80dockercompose` → `S98confirm` → `S99otacheck`). |
+| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S49ntp` → `S50sshd` → `S60ota` → application services at `S70+`). The OTA layer must run before the application so a broken application image cannot block OTA acquisition; the application's own probe (`/etc/ota/health-probe`) gates the slot commit in phase 2. |
 | New userspace tool / agent | `board/linxdot/overlay/usr/sbin/<name>`, or a Buildroot package under `package/<name>/` | Replaced on every OTA. |
 | Persistent application state | `/data/<your-app>/` — write at runtime, document the path | Survives OTA. **Never use `/var`, `/etc`, `/root`, `/home` as a "persistent" location** — see § 9.3. |
 | New kernel module (Phase 1–4) | Add prebuilt under `board/linxdot/modules/<kernel-version>/` (LFS-tracked) | Replaced on every OTA via `post-build.sh`. Add the file to the CI base-hash (§ 9.6). |
@@ -633,7 +638,7 @@ Before opening a PR for a change that's intended to ship via OTA:
 - [ ] `sh tests/test_consistency.sh` passes locally.
 - [ ] If your change touches the U-Boot fragment, env, partition layout, or `fw_env.config`: documented as a bootloader-frozen change (§ 9.4) and migration plan added to release notes.
 - [ ] If your change adds persistent state: stored under `/data/<...>`, not in the overlayfs traps. Documented in the relevant init script.
-- [ ] If your change adds an init script: numbered consistently with the existing `S##` ordering; exits 0 on `start`/`stop`; doesn't block boot longer than necessary (S99otacheck pattern: background everything).
+- [ ] If your change adds an init script: numbered consistently with the existing `S##` ordering; exits 0 on `start`/`stop`; doesn't block boot longer than necessary (`S60ota` pattern for long-running tasks: do the synchronous part, then background the rest before exiting).
 - [ ] If your change touches signing or `swupdate.config`: bidirectional signature test (signed bundle accepted, unsigned bundle refused) verified on hardware.
 - [ ] If your change touches a Buildroot base-build input: the file is in the `detect-changes` hash list in `.github/workflows/build.yml`.
 - [ ] If your change can be hardware-tested: TC-4.4 (happy path) re-run locally on the Workbench LD1001 and the result documented in the PR description.
@@ -671,19 +676,48 @@ If you add a runtime gotcha that bit you on hardware, add a static check to `tes
 | TC-3.2 | OTA state machine | `sh tests/test_ota_state_machine.sh` | All 10 simulated scenarios pass (healthy boots, transient hangs, trial-boot commit, rollback both directions, bootlimit edge) |
 | TC-3.3 | Built U-Boot boots | Flash built image, observe serial | Reaches Linux login using Buildroot-produced `u-boot-rockchip.bin` (unified SPL + FIT + BL31) |
 | TC-3.4 | `fw_setenv` from Linux | `fw_setenv test_var hello; fw_printenv test_var` on device | Writes and reads back correctly |
-| TC-3.5 | Healthy-slot transient resilience | Force enough reboots to exceed `bootlimit` without committing (simulate crash before `S98confirm` on slot A) | `altbootcmd` fires, resets `bootcount`, slot remains A (not flipped) |
+| TC-3.5 | Healthy-slot transient resilience | Force enough reboots to exceed `bootlimit` without committing (simulate crash before `S60ota` phase 2 commits on slot A) | `altbootcmd` fires, resets `bootcount`, slot remains A (not flipped) |
 | TC-3.6 | Rollback on broken slot | Install garbage to rootfs_b, `fw_setenv boot_slot B upgrade_available 1 bootcount 0`, reboot | U-Boot tries B, fails N times, `altbootcmd` flips to A, device boots A |
 
 ### 10.3 Phase 4 verification
 
-| Test ID | Feature | Procedure | Expected |
-|---|---|---|---|
-| TC-4.1 | SWU packaging | `sh tests/test_swu_packaging.sh` | CPIO archive built, `sw-description` is first entry, sha256 placeholders substituted |
-| TC-4.2 | Image layout | `IMAGE=... sh tests/test_image_layout.sh` | 5 partitions, boot_a at 16 MiB, non-empty SPL region at 32 KiB and env region at 14 MiB |
-| TC-4.3 | Signature required | Generate keypair, sign release, flash; publish unsigned release next | Device refuses unsigned bundle, `swupdate` logs signature failure |
-| TC-4.4 | End-to-end happy path | Device on v0.1.0, publish v0.1.1, wait 60 s after boot | `S99otacheck` fetches manifest, downloads, writes inactive slot, reboots; `S98confirm` commits; `fw_printenv boot_slot` matches target, `os-release VERSION_ID=0.1.1` |
-| TC-4.5 | End-to-end rollback | Device on v0.1.1 (committed), publish deliberately-broken v0.1.2 | Device attempts v0.1.2, fails, `altbootcmd` rolls back to v0.1.1 within `bootlimit` cycles |
-| TC-4.6 | Manual trigger | `ssh root@<device> ota-check` | Same flow as boot-time, runs in foreground |
+The test plan is **build-time-optimized**: most failure-mode tests are runtime-only (no rebuild) by toggling `HEALTH_CHECK` in `/data/ota.conf` or replacing `/etc/ota/health-probe` via SSH. The CI cost model is:
+
+| Change type | CI build cost | Use for |
+|---|---|---|
+| Tag-only bump (same commit) | ~2 min (assembly only, full base cache hit) | OTA mechanism tests, slot-flip, version diff |
+| Overlay-only edit (`/etc/init.d/*`, `/etc/ota/*`, `/etc/default/ota`) | ~2-3 min (assembly only) | Behavioral tests of init scripts, probe logic |
+| `defconfig` / package edit | ~30 min cold (full base rebuild) | Avoid if at all possible |
+| Runtime config (`/data/ota.conf`, SSH-edit) | **0 min** (no build) | Most failure-mode tests |
+
+Two releases (`vN` and `vN+1`, same commit) are sufficient for the full happy-path + most failure-path coverage.
+
+| Test ID | Feature | Procedure | Expected | Build cost |
+|---|---|---|---|---|
+| **TC-4.1** | SWU packaging | `sh tests/test_swu_packaging.sh` | CPIO archive built, `sw-description` is first entry, sha256 placeholders substituted | 0 |
+| **TC-4.2** | Image layout | `IMAGE=... sh tests/test_image_layout.sh` | 5 partitions, boot_a at 16 MiB, non-empty SPL region at 32 KiB and env region at 14 MiB | 0 |
+| **TC-4.3** | Static OTA-compatibility | `sh tests/test_consistency.sh` | All cross-file invariants hold (env offsets, selector path, signing symmetry, overlayfs flags, busybox-pgrep) | 0 |
+| **TC-4.4** | Happy-path OTA (`vN → vN+1`) | Device on `vN`, retag same commit as `vN+1` (or push a new release), power-cycle | After ≤ 5 min: `VERSION_ID=vN+1`, `boot_slot` flipped, `upgrade_available=0`, `bootcount=0`, `S60ota` phase 2 logged commit | 1× retag (~2 min) |
+| **TC-4.5** | Phase 1 skipped on trial boot | Force trial state without an OTA: `fw_setenv upgrade_available 1; fw_setenv bootcount 0; reboot` | Phase 1 does NOT fetch manifest (no OTA-on-OTA); phase 2 polls health probe; commits within `HEALTH_TIMEOUT` | 0 |
+| **TC-4.6** | Health-check rollback (`HEALTH_CHECK=never`) | `echo HEALTH_CHECK=never > /data/ota.conf; fw_setenv upgrade_available 1; reboot`; reboot 3× more | After exhausting `bootlimit`: U-Boot fires `altbootcmd`, slot flips, `upgrade_available=0`, `bootcount=0`, device on previous version. **Cleanup:** `rm /data/ota.conf` | 0 |
+| **TC-4.7** | Pre-apply failure (network blocked) | Add `127.0.0.1 github.com` to overlay `/etc/hosts` (or block via firewall), run `ota-check` | `ota-check` exits non-zero, `/tmp/update.swu` absent, slot untouched, `upgrade_available=0` | 0 |
+| **TC-4.8** | Health-probe swappability | `printf '#!/bin/sh\nexit 1\n' > /etc/ota/health-probe`; trigger trial state | Probe ignores `HEALTH_CHECK`, S60 phase 2 always fails, bootloader rolls back after `bootlimit` | 0 |
+| **TC-4.9** | Cold-boot clock bootstrap | Power off ≥ 10 min, power on, SSH immediately | `date` initially shows ~2017 (RK3566 RTC default); within ≤ 90 s, jumps to current year; HTTPS manifest fetch succeeds post-jump | 0 (real power cycle) |
+| **TC-4.10** | `/data` persistence across OTA | `echo marker > /data/marker` before OTA | After slot flip: `/data/marker` intact, `/data/.initialized` intact, eMMC-bound MAC still applied to `eth0` | 0 (rides on TC-4.4) |
+| **TC-4.11** | Overlayfs A/B portability | Inspect `/etc` overlay before and after slot flip; check `dmesg` | No `ESTALE` / `failed to verify` entries; `/etc` upper-layer files visible on both slots' lowerdirs (verifies `index=off,xino=off,redirect_dir=off`) | 0 (rides on TC-4.4) |
+| **TC-4.12** | Manual trigger | `ssh root@<device> ota-check` | Same flow as boot-time phase 1; foreground; refuses if `upgrade_available=1` | 0 |
+| **TC-4.13** | Manifest reachability probe | `ssh root@<device> ota-check --dry-run` | Exits 0 on healthy network; verifies clock + DNS + TLS + manifest fetch+parse without downloading the `.swu` | 0 |
+| **TC-4.14** | Concurrent `ota-check` race (regression) | `( ota-check & ota-check & wait )` on a device with a newer release published | No sha256 mismatch; one run cleanly applies, the other reports an expected error. *(Known issue: race observed during v1.0.9 OTA; `flock` fix tracked in § 12.2.)* | 0 |
+| **TC-4.15** | Signature required | Generate keypair, sign release, flash; publish unsigned release next | Device refuses unsigned bundle, `swupdate` logs signature failure | 1× crafted release |
+| **TC-4.16** | Full-brick recovery | Build a release where `/etc/init.d/S00datapart` `exit 1`s immediately; OTA into it | Trial slot fails to mount `/data`, kernel/init crashes on each retry, bootcount climbs across 3 boots, `altbootcmd` flips back, device on previous version | 1× crafted overlay-only release (~2-3 min) |
+
+**Pre-test checklist:**
+- Device reachable on the LAN; root credentials known.
+- Workbench Pi serial console accessible (required for TC-4.16 — SSH won't work if init crashes).
+- `/data/ota.conf` absent on the device (defaults apply at start).
+- `gh release list` shows the expected `vN`, `vN+1`.
+
+**Suggested execution order** (build-cost-minimal): TC-4.1 → 4.2 → 4.3 (CI static checks) → 4.9 (cold boot) → 4.4 (happy path) → 4.10, 4.11 (free observations after 4.4) → 4.6 (rollback drill) → 4.7 (network block) → 4.8 (probe swap) → 4.5 (trial-boot phase split) → 4.12, 4.13 (manual triggers) → 4.14 (race regression) → 4.15, 4.16 (hostile / brick recovery — last). **Total CI build cost for the full plan: ≤ 4 release builds × ~2 min ≈ 8 min.**
 
 ### 10.4 Traceability Matrix
 
@@ -698,19 +732,19 @@ If you add a runtime gotcha that bit you on hardware, add a static check to `tes
 | FR-2.2 | Must | TC-1.8 | Covered |
 | FR-2.3 | Must | TC-1.2 | Covered |
 | FR-2.4 | Should | TC-1.9 (TLS works) | Covered |
-| FR-3.1 | Must | TC-4.4 | Covered |
-| FR-3.2 | Must | TC-4.6 | Covered |
+| FR-3.1 | Must | TC-4.4, TC-4.5 | Covered |
+| FR-3.2 | Must | TC-4.12 | Covered |
 | FR-3.3 | Must | TC-4.1, TC-4.4 | Covered |
 | FR-3.4 | Must | TC-3.2, TC-4.4 | Covered |
-| FR-3.5 | Must | TC-4.3 | Covered |
-| FR-3.6 | Must | TC-3.2 | Covered |
+| FR-3.5 | Must | TC-4.15 | Covered |
+| FR-3.6 | Must | TC-3.2, TC-4.12 | Covered |
 | FR-3.7 | Should | TC-4.4 (logs visible) | Covered |
-| FR-4.1 | Must | TC-4.4 | Covered |
+| FR-4.1 | Must | TC-4.4, TC-4.6, TC-4.8 | Covered |
 | FR-4.2 | Must | TC-3.4, TC-4.4 | Covered |
 | FR-4.3 | Must | TC-3.2 | Covered |
 | FR-4.4 | Must | TC-3.2, TC-3.5 | Covered |
 | FR-4.5 | Must | TC-3.5 | Covered |
-| FR-4.6 | Must | TC-3.6, TC-4.5 | Covered |
+| FR-4.6 | Must | TC-3.6, TC-4.6, TC-4.16 | Covered |
 | FR-5.1 | Must | TC-1.3 | Covered |
 | FR-5.2 | Should | TC-1.7 (overlay persists host keys) | Covered |
 | FR-5.3 | Should | Manual verification via Workbench | Covered |
@@ -737,7 +771,7 @@ If you add a runtime gotcha that bit you on hardware, add a static check to `tes
 | Gateway not connecting to TTN | Bad API key, wrong region, firewall | `docker logs basicstation` | Verify key and region; open outbound 443 |
 | OTA never triggers | Device still on Phase 1 single-slot image | `fw_printenv` returns error | Migrate per § 8.4 |
 | OTA triggers but rolls back | New slot fails health gate | Serial console during trial boot: check kernel panic, init errors, Docker failures | Fix underlying issue in firmware, re-release |
-| `upgrade_available=1` stuck | `S98confirm` didn't run or crashed | `logger -t ota` entries | `fw_setenv upgrade_available 0; fw_setenv bootcount 0` |
+| `upgrade_available=1` stuck | `S60ota` phase 2 probe never returned 0 within `HEALTH_TIMEOUT`, or didn't run | `logger -t ota` entries; `cat /etc/ota/health-probe; /etc/ota/health-probe; echo $?`; check `/data/ota.conf` for `HEALTH_CHECK=never` left over from a rollback drill | Resolve probe failure (network, application, config); manual override: `fw_setenv upgrade_available 0; fw_setenv bootcount 0` |
 | Can't boot either slot | Bootloader broken or both slots corrupted | Serial console for U-Boot output | `rockusb` from U-Boot prompt; reflash via `rkdeveloptool` |
 
 ## 12. Open Items / Backlog
@@ -795,9 +829,9 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 ### 12.2 Phase 4 — OTA update layer
 
 **Software scaffolding (present — verified end-to-end on rc12+):**
-- [x] `ota-check` script (FR-3.1, FR-3.2, FR-3.3, FR-3.7) — in `board/linxdot/overlay/usr/sbin/ota-check`.
-- [x] `S99otacheck` boot-time hook (FR-3.1) — in overlay init.d.
-- [x] `S98confirm` health gate (FR-4.1, FR-4.2) — in overlay init.d (configurable via `/data/ota.conf`).
+- [x] `ota-check` script (FR-3.1, FR-3.2, FR-3.3, FR-3.7) — in `board/linxdot/overlay/usr/sbin/ota-check`. Supports `--dry-run` for the health probe.
+- [x] `S60ota` boot-time hook (FR-3.1, FR-4.1) — in overlay init.d. Replaces the legacy `S99otacheck` (acquire) + `S98confirm` (commit) pair with a single two-phase script. Phase 2 backgrounds the probe loop so init can continue to `S70+` (application).
+- [x] `/etc/ota/health-probe` — swappable application probe (FR-4.1). Default ships with the OTA-only base, honors `HEALTH_CHECK` selector via `/etc/default/ota` and `/data/ota.conf`.
 - [x] `sw-description.tmpl` (FR-3.3, FR-3.5) — in `board/linxdot/swupdate/`. Flat 2-level layout (`software.stable.target-{A,B}`).
 - [x] `scripts/gen-signing-key.sh` (FR-3.5, signing-key lifecycle) — keypair deployed: private half in `OTA_SIGNING_KEY` GitHub secret, public half in `board/linxdot/overlay/etc/swupdate/public.pem`. CI signs every release with `openssl dgst -sha256 -sign`; deployed devices verify via `swupdate -k`.
 - [x] CI `.swu` build + `manifest.json` (with `size` field for pre-flight) emission — exercised on rc11→rc12.
@@ -806,9 +840,19 @@ Consolidated list of work remaining per phase. Close an item by deleting its lin
 - [x] **TC-4.1** SWU packaging static test (`tests/test_swu_packaging.sh`) — CI green from rc1 onward.
 - [x] **TC-4.2** Image-layout partition check (`tests/test_image_layout.sh`) — CI green from rc1 onward.
 - [x] **TC-4.3** Signature required — signed off 2026-04-25 on rc17 (`CONFIG_SIGNED_IMAGES=y` + `CONFIG_SIGALG_RAWRSA=y`). Bidirectional: a signed bundle (rc17, has `sw-description.sig` second in cpio) feeds through `swupdate -v -c -i …swu -k /etc/swupdate/public.pem` with exit 0 and "SWUPDATE successful"; an unsigned bundle (rc15, no `.sig`) is refused with exit 1 and `description file name not the first of the list: rootfs.ext4 instead of sw-description.sig`. With `CONFIG_SIGNED_IMAGES=y`, swupdate hard-requires `sw-description.sig` as the second cpio entry — there is no fallback for the parser to accept an unsigned bundle. **Note**: `rc17` was the first build with signing actually compiled in; `rc16` shipped public.pem in the rootfs but the binary still parsed `-k` as `invalid option -- 'k'`, silently bypassing verification — caught in this session and locked down by static check in `tests/test_consistency.sh`.
-- [x] **TC-4.4** End-to-end happy path — signed off 2026-04-25 on the Workbench LD1001 (rc12 → rc13 OTA). Sequence on slot A's first boot: SSH up at 08:06:09 → S98confirm logged `trial boot of slot A — health_check=minimal timeout=60s` at 08:06:13 → `slot A committed (health_check=minimal)` < 1 s later (dockerd's pidof match). Final state: `VERSION_ID=0.4.0-rc13`, `boot_slot=A`, `upgrade_available=0`, `bootcount=0`, all three overlays (`/usr`, `/var/lib`, `/etc`) re-mounted with `index=off,xino=off,redirect_dir=off,metacopy=off` on the *new* slot's lowerdir without ESTALE — proving slot-portability. No human intervention from `ota-check` invocation through commit.
-- [x] **TC-4.5** End-to-end rollback — signed off 2026-04-25 on the Workbench LD1001 (rc14 → rc15 OTA with `HEALTH_CHECK=never`). Boots after the OTA reboot: `boot 1: slot=A ua=1 bc=1 ver=rc15` → `boot 2: slot=A ua=1 bc=2 ver=rc15` → `boot 3: slot=A ua=1 bc=3 ver=rc15` (still under bootlimit) → `boot 4: slot=B ua=0 bc=0 ver=rc14` — bootcount overflowed (3→4 > limit 3), U-Boot ran `altbootcmd` which flipped `boot_slot` A→B, cleared `upgrade_available` and `bootcount`. Slot B's rc14 (the version that *was* committed before the failed upgrade) is back as the running version. End-to-end exercise of FR-4.4/4.6 from S98confirm-failure through to bootloader-driven recovery, no human intervention.
-- [x] **TC-4.6** Manual trigger (`ssh root@<device> ota-check`) — exercised in rc7 / rc11; flow matches FR-3.2.
+- [x] **TC-4.4** Happy-path OTA — signed off 2026-04-25 on the Workbench LD1001 (rc12 → rc13 with the legacy S98confirm); re-validated 2026-05-02 on the consolidated S60ota with the v1.0.10 → v1.1.0 → v1.2.0 chain. Final hop's slot-B trial boot ran S60ota phase 2 (the new code), polled `/etc/ota/health-probe` (default — full mode), committed within ~90 s. Final state: `VERSION_ID=1.2.0`, `boot_slot=B`, `upgrade_available=0`, `bootcount=0`. No human intervention from power-on through commit.
+- [x] **TC-4.5** Phase 1 skipped on trial boot — implicit pass during TC-4.4 (no OTA-on-OTA observed); not actively forced.
+- [x] **TC-4.6** Health-check rollback (`HEALTH_CHECK=never`) — signed off 2026-04-25 on rc14 → rc15 with the legacy S98confirm. Boots after the OTA reboot: `boot 1: slot=A ua=1 bc=1 ver=rc15` → `boot 2: slot=A ua=1 bc=2 ver=rc15` → `boot 3: slot=A ua=1 bc=3 ver=rc15` (still under bootlimit) → `boot 4: slot=B ua=0 bc=0 ver=rc14` — bootcount overflowed (3→4 > limit 3), U-Boot ran `altbootcmd` which flipped `boot_slot` A→B, cleared `upgrade_available` and `bootcount`. End-to-end exercise of FR-4.4/4.6 from health-failure through to bootloader-driven recovery, no human intervention. Re-test on consolidated S60ota deferred (probe ownership unchanged; bootloader path identical).
+- [x] **TC-4.8** Health-probe swappability — signed off 2026-05-02 on v1.2.0. Replacing `/etc/ota/health-probe` with `#!/bin/sh\nexit 1\n` causes the probe to fail regardless of `HEALTH_CHECK` setting; restoring the default makes it pass. Confirms the application-package contract — overlay drops a probe, OTA layer doesn't import application logic.
+- [x] **TC-4.9** Cold-boot clock bootstrap — signed off 2026-05-02. After power-cycle, `date` showed `2017-08-05` for ≤ 90 s, then jumped to `2026-05-02` via `/usr/sbin/clock-bootstrap`. HTTPS manifest fetch succeeded immediately after.
+- [x] **TC-4.10** `/data` persistence across OTA — implicit pass during TC-4.4 chain (eMMC-bound MAC, `/data/.initialized`, sshd host keys all survived two slot flips).
+- [x] **TC-4.11** Overlayfs A/B portability — implicit pass during TC-4.4 chain (devices crossed `A → B → A → B` without `ESTALE`; `/etc` upper-layer files visible on both slots' lowerdirs).
+- [x] **TC-4.12** Manual trigger (`ssh root@<device> ota-check`) — exercised in rc7 / rc11 / v1.0.x; flow matches FR-3.2.
+- [x] **TC-4.13** Manifest reachability probe (`ota-check --dry-run`) — signed off 2026-05-02 on v1.2.0; default `/etc/ota/health-probe` exits 0 in committed state, `HEALTH_CHECK=always` short-circuits to 0, `HEALTH_CHECK=never` short-circuits to 1.
+- [~] **TC-4.14** Concurrent `ota-check` race — race observed during v1.0.9 OTA (sha256 mismatch from two parallel processes; self-recovered). Open: add `flock /var/run/ota-check.lock` to ota-check.
+- [ ] **TC-4.7** Pre-apply failure (network blocked) — pending runtime test.
+- [ ] **TC-4.15** Signature required — covered by static checks; runtime hardware test still on the legacy rc17 sign-off (S98confirm era). Re-validation low priority — signing path is independent of S60ota consolidation.
+- [ ] **TC-4.16** Full-brick recovery — pending crafted release.
 
 **Session-6 learnings captured in code (commits `c36c7e8`, `09cf861`, `a983d88`, `aa01e4f`, `b3ccf3e`, `fc79f0d`, `0e4cbf5`, `e3e77d8`):**
 
