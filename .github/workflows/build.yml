@@ -61,8 +61,8 @@ jobs:
           for f in board/linxdot/overlay/etc/init.d/S00datapart \
                    board/linxdot/overlay/etc/init.d/S40network \
                    board/linxdot/overlay/etc/init.d/S50sshd \
-                   board/linxdot/overlay/etc/init.d/S98confirm \
-                   board/linxdot/overlay/etc/init.d/S99otacheck \
+                   board/linxdot/overlay/etc/init.d/S60ota \
+                   board/linxdot/overlay/etc/ota/health-probe \
                    board/linxdot/overlay/etc/fw_env.config \
                    board/linxdot/genimage.cfg \
                    board/linxdot/post-build.sh \

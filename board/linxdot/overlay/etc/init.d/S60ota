@@ -1,0 +1,55 @@
+#!/bin/sh
+# S60ota — boot-time OTA acquire + slot commit, in one script.
+#
+# Phase 1 (committed slot, synchronous): try to fetch and apply a newer
+#   image. ota-check reboots from inside on success — phase 2 never runs.
+#   On any failure (no newer version, network down, sig mismatch) we just
+#   continue boot on the current slot; the next power-up retries.
+#
+# Phase 2 (trial slot, background): poll /etc/ota/health-probe; on
+#   success, clear upgrade_available so U-Boot stops counting boots.
+#   If unhealthy after HEALTH_TIMEOUT, exit; bootcount climbs and U-Boot
+#   rolls back via altbootcmd.
+#
+# The two phases are mutually exclusive: a trial boot must not OTA on
+# top of an unconfirmed slot.
+
+case "$1" in
+    start) ;;
+    stop|*) exit 0 ;;
+esac
+
+TRIAL=0
+[ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ] && TRIAL=1
+
+# ── Phase 1: acquire on committed slots only ────────────────────────────
+if [ "$TRIAL" -eq 0 ]; then
+    /usr/sbin/ota-check 2>&1 | logger -t ota-boot
+    exit 0
+fi
+
+# ── Phase 2: trial-boot health probe + slot commit ──────────────────────
+HEALTH_TIMEOUT=300
+[ -r /etc/default/ota ] && . /etc/default/ota
+[ -r /data/ota.conf ]   && . /data/ota.conf
+
+SLOT=$(fw_printenv -n boot_slot 2>/dev/null || echo "?")
+logger -t ota "trial boot of slot $SLOT — probing /etc/ota/health-probe (timeout=${HEALTH_TIMEOUT}s)"
+
+# Backgrounded so init can continue to S70+ (the application starts there).
+# Probe will naturally fail until the app has come up; loop keeps trying.
+(
+    end=$(( $(cut -d. -f1 /proc/uptime) + HEALTH_TIMEOUT ))
+    while [ "$(cut -d. -f1 /proc/uptime)" -lt "$end" ]; do
+        if /etc/ota/health-probe >/dev/null 2>&1; then
+            fw_setenv upgrade_available 0
+            fw_setenv bootcount 0
+            logger -t ota "slot $SLOT committed"
+            exit 0
+        fi
+        sleep 5
+    done
+    logger -t ota "slot $SLOT health timeout — bootloader will roll back on next reboot"
+) &
+
+exit 0

@@ -1,0 +1,38 @@
+#!/bin/sh
+# /etc/ota/health-probe — default OTA-only base health probe.
+#
+# Contract: exit 0 means "this slot is healthy enough to commit". Any
+# non-zero exit means "not yet". S60ota polls this in a loop during
+# trial boot; if it never returns 0 within HEALTH_TIMEOUT, U-Boot
+# rolls the slot back via bootcount/altbootcmd.
+#
+# Application packages (basicstation, etc.) overwrite this file with
+# a probe that checks their own up-and-running condition. The OTA
+# layer doesn't import application logic; it just runs this script.
+#
+# Default policy for the OTA-only base: the slot is healthy iff the
+# OTA path itself works end-to-end — default route, clock-bootstrap,
+# and a manifest fetch+parse via `ota-check --dry-run`. Guarantees the
+# next OTA can land. HEALTH_CHECK in /etc/default/ota selects looser
+# policies for testing or rollback drills.
+
+. /etc/default/ota 2>/dev/null
+[ -r /data/ota.conf ] && . /data/ota.conf
+
+case "${HEALTH_CHECK:-full}" in
+    always)
+        exit 0
+        ;;
+    never)
+        exit 1
+        ;;
+    network)
+        ip route get 1.1.1.1 >/dev/null 2>&1 \
+            && /usr/sbin/clock-bootstrap >/dev/null 2>&1
+        ;;
+    full|*)
+        ip route get 1.1.1.1 >/dev/null 2>&1 \
+            && /usr/sbin/clock-bootstrap >/dev/null 2>&1 \
+            && /usr/sbin/ota-check --dry-run >/dev/null 2>&1
+        ;;
+esac
