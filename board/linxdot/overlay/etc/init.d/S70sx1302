@@ -1,0 +1,63 @@
+#!/bin/sh
+# S70sx1302 — bring up the SX1302 LoRa concentrator with bounded reboot
+# recovery. SX1302 is application infrastructure and must run *after*
+# S60ota (the OTA layer is application-agnostic and must always run, even
+# when the chip is broken — it's the only path to ship a fix). There's no
+# point continuing to the application proper with a non-functional chip;
+# this script handles transient + sticky failures here at the application
+# boundary so the application doesn't have to.
+#
+# Layered recovery:
+#   Layer A (in-script):  /usr/sbin/sx1302-reset retries 3× internally.
+#                         Catches transient bring-up failures (slow GPIO
+#                         settle, kernel-driver init order race).
+#   Layer B (this script): if Layer A still failed, reboot. /data counter
+#                         caps total reboots at REBOOT_MAX so a hardware-
+#                         dead chip doesn't loop forever — after exhausting
+#                         the budget we exit 0 and let init continue, so
+#                         the device stays SSH-able and OTA can ship a fix.
+#
+# Trial-boot safety: when upgrade_available=1 we never trigger our own
+# reboot. The bootloader already owns rollback in that state via bootcount
+# / altbootcmd; competing with it would create incoherent flip-flopping.
+# A failed chip on a trial boot will be rolled back at the next boot
+# anyway (the previous slot was committed with a working chip).
+
+case "$1" in
+    start) ;;
+    stop|*) exit 0 ;;
+esac
+
+COUNTER=/data/.sx1302-reboots
+REBOOT_MAX=3
+
+if /usr/sbin/sx1302-reset; then
+    rm -f "$COUNTER"          # healthy — clear the recovery budget
+    exit 0
+fi
+
+logger -t sx1302 "S70: sx1302-reset failed after internal retries"
+
+# Trial boot — defer to bootloader rollback, don't race it
+if [ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ]; then
+    logger -t sx1302 "S70: trial boot in progress — leaving rollback to bootloader"
+    exit 0
+fi
+
+# Committed slot — bounded reboot recovery
+count=0
+[ -f "$COUNTER" ] && count=$(cat "$COUNTER" 2>/dev/null || echo 0)
+case "$count" in ''|*[!0-9]*) count=0 ;; esac
+
+if [ "$count" -ge "$REBOOT_MAX" ]; then
+    logger -t sx1302 "S70: chip dead after $REBOOT_MAX recovery reboots — leaving device for SSH/OTA diagnosis"
+    exit 0
+fi
+
+count=$((count + 1))
+echo "$count" > "$COUNTER"
+sync
+logger -t sx1302 "S70: rebooting to recover chip ($count/$REBOOT_MAX)"
+sleep 5
+reboot
+exit 0

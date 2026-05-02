@@ -1,7 +1,7 @@
 #!/bin/sh
 # /usr/sbin/sx1302-reset — full bring-up of the SX1302 LoRa concentrator.
 #
-# Sequence:
+# Sequence per attempt:
 #   1. Power rails: drop POWER+EXTRA to 0, settle, raise to 1.
 #   2. Reset pulse: drive RESET high, settle, drive low (release).
 #   3. Settle delay so the chip exits reset and is ready for SPI.
@@ -15,14 +15,19 @@
 #                         the chip echoes hardcoded values but the
 #                         internal state can't be mutated.
 #
+# Wrapped in a 3-attempt retry loop. Catches transient bring-up failures
+# (slow GPIO settle, kernel-driver init order, bus enumeration race)
+# without involving the init-system reboot machinery.
+#
 # Exit 0 = chip is electrically powered, SPI bus works in both directions,
-# chip's internal logic is responsive. Exit non-zero = something specific
-# failed; the log line names which step.
+# chip's internal logic is responsive (passed at least one of 3 attempts).
+# Exit 1 = all 3 attempts failed; caller (S70sx1302) decides whether to
+# escalate to a reboot.
 #
 # Adapted from the Linxdot vendor reset.sh (main branch). The OTA-only
 # base owns the chip directly — no docker, no basicstation context.
 
-set -eu
+set -u
 
 # ── GPIOs (RK3566 sysfs numbering, see Docs/Hardware.md) ────────────────
 POWER_GPIO=23     # primary 3v3 LDO enable
@@ -38,26 +43,32 @@ REG_VERSION=0x5610      # read-only chip ID, expected 0x10
 REG_GPIO_DIR=0x4203     # writable, used for L3 write/readback
 EXPECTED_VERSION=10     # hex string from od
 
-log()  { echo "sx1302-reset: $*"; logger -t sx1302 "$*" 2>/dev/null || true; }
-fail() { log "FAIL $*"; exit 1; }
+# ── Retry budget ────────────────────────────────────────────────────────
+ATTEMPT_MAX=3
+
+log()    { echo "sx1302-reset: $*"; logger -t sx1302 "$*" 2>/dev/null || true; }
+warn()   { log "WARN $*"; }
+giveup() { log "FAIL $*"; return 1; }
 
 # ── GPIO helpers ────────────────────────────────────────────────────────
 export_gpio() {
     pin=$1
     if [ ! -d "/sys/class/gpio/gpio$pin" ]; then
         echo "$pin" > /sys/class/gpio/export 2>/dev/null \
-            || fail "cannot export gpio$pin (sysfs busy or kernel rejected)"
+            || { warn "cannot export gpio$pin"; return 1; }
     fi
-    [ -d "/sys/class/gpio/gpio$pin" ] || fail "gpio$pin missing after export"
+    [ -d "/sys/class/gpio/gpio$pin" ] || { warn "gpio$pin missing after export"; return 1; }
     echo out > "/sys/class/gpio/gpio$pin/direction" \
-        || fail "cannot set gpio$pin direction=out"
+        || { warn "cannot set gpio$pin direction=out"; return 1; }
 }
 write_gpio()  {
-    echo "$2" > "/sys/class/gpio/gpio$1/value" || fail "cannot write gpio$1=$2"
+    echo "$2" > "/sys/class/gpio/gpio$1/value" \
+        || { warn "cannot write gpio$1=$2"; return 1; }
 }
 verify_gpio() {
-    actual=$(cat "/sys/class/gpio/gpio$1/value") || fail "cannot read gpio$1"
-    [ "$actual" = "$2" ] || fail "gpio$1 readback=$actual, expected $2"
+    actual=$(cat "/sys/class/gpio/gpio$1/value" 2>/dev/null) \
+        || { warn "cannot read gpio$1"; return 1; }
+    [ "$actual" = "$2" ] || { warn "gpio$1 readback=$actual, expected $2"; return 1; }
 }
 
 # ── SPI helpers ─────────────────────────────────────────────────────────
@@ -73,7 +84,7 @@ spi_read() {
     rx=$( ( byte 0; byte "$ah"; byte "$al"; byte 0; byte 0 ) \
           | spi-pipe -d "$SPIDEV" -s "$SPI_SPEED" \
           | od -An -tx1 | tr -d ' \n')
-    [ "${#rx}" -eq 10 ] || fail "spi_read($addr): got $((${#rx} / 2)) bytes, want 5"
+    [ "${#rx}" -eq 10 ] || { warn "spi_read($addr): got $((${#rx} / 2)) bytes, want 5"; return 1; }
     echo "${rx#????????}"            # last byte = register value
 }
 
@@ -84,71 +95,87 @@ spi_write() {
     al=$(( addr & 0xFF ))
     ( byte 0; byte "$ah"; byte "$al"; byte 0; byte "$val" ) \
         | spi-pipe -d "$SPIDEV" -s "$SPI_SPEED" >/dev/null \
-        || fail "spi_write($addr=$val) failed"
+        || { warn "spi_write($addr=$val) failed"; return 1; }
 }
 
-# ── 1. Power rails ──────────────────────────────────────────────────────
-log "step 1: power rails"
-export_gpio "$POWER_GPIO"
-export_gpio "$EXTRA_GPIO"
-export_gpio "$RESET_GPIO"
+# ── One full bring-up attempt ───────────────────────────────────────────
+try_once() {
+    attempt=$1
 
-write_gpio "$POWER_GPIO" 0
-write_gpio "$EXTRA_GPIO" 0
-sleep 1
+    # Step 1 — power rails
+    export_gpio "$POWER_GPIO" || return 1
+    export_gpio "$EXTRA_GPIO" || return 1
+    export_gpio "$RESET_GPIO" || return 1
 
-write_gpio "$POWER_GPIO" 1
-write_gpio "$EXTRA_GPIO" 1
-sleep 1
+    write_gpio "$POWER_GPIO" 0 || return 1
+    write_gpio "$EXTRA_GPIO" 0 || return 1
+    sleep 1
+    write_gpio "$POWER_GPIO" 1 || return 1
+    write_gpio "$EXTRA_GPIO" 1 || return 1
+    sleep 1
 
-# ── 2. Reset pulse ──────────────────────────────────────────────────────
-log "step 2: reset pulse"
-write_gpio "$RESET_GPIO" 1
-sleep 0.1
-write_gpio "$RESET_GPIO" 0
-sleep 0.1
+    # Step 2 — reset pulse
+    write_gpio "$RESET_GPIO" 1 || return 1
+    sleep 0.1
+    write_gpio "$RESET_GPIO" 0 || return 1
+    sleep 0.1
 
-verify_gpio "$POWER_GPIO" 1
-verify_gpio "$EXTRA_GPIO" 1
-verify_gpio "$RESET_GPIO" 0
-log "GPIO state OK (power=1 extra=1 reset=0)"
+    verify_gpio "$POWER_GPIO" 1 || return 1
+    verify_gpio "$EXTRA_GPIO" 1 || return 1
+    verify_gpio "$RESET_GPIO" 0 || return 1
 
-# ── 3. Settle ────────────────────────────────────────────────────────────
-sleep 0.1
-[ -c "$SPIDEV" ] || fail "$SPIDEV not present (kernel didn't expose spidev?)"
-command -v spi-pipe >/dev/null 2>&1 || fail "spi-pipe not on PATH"
+    # Step 3 — settle + sanity-check tools/paths
+    sleep 0.1
+    [ -c "$SPIDEV" ] || { warn "$SPIDEV not present"; return 1; }
+    command -v spi-pipe >/dev/null 2>&1 || { warn "spi-pipe not on PATH"; return 1; }
 
-# ── 4. L1: chip ID ──────────────────────────────────────────────────────
-log "step 4: chip ID at $REG_VERSION"
-ver=$(spi_read $REG_VERSION)
-[ "$ver" = "$EXPECTED_VERSION" ] || fail "version=0x$ver, expected 0x$EXPECTED_VERSION (chip not responding)"
-log "chip ID = 0x$ver (OK)"
+    # Step 4 — L1 chip ID
+    ver=$(spi_read $REG_VERSION) || return 1
+    if [ "$ver" != "$EXPECTED_VERSION" ]; then
+        warn "attempt $attempt: chip ID = 0x$ver, expected 0x$EXPECTED_VERSION"
+        return 1
+    fi
 
-# ── 5. L2: register sweep ───────────────────────────────────────────────
-log "step 5: register sweep"
-sweep=""
-for a in 0x5610 0x5611 0x5604 0x5614 0x5615 0x4203; do
-    v=$(spi_read $a)
-    sweep="$sweep $v"
+    # Step 5 — L2 register sweep
+    sweep=""
+    for a in 0x5610 0x5611 0x5604 0x5614 0x5615 0x4203; do
+        v=$(spi_read $a) || return 1
+        sweep="$sweep $v"
+    done
+    distinct=$(echo $sweep | tr ' ' '\n' | sort -u | wc -l)
+    if [ "$distinct" -lt 2 ]; then
+        warn "attempt $attempt: register sweep stuck ($sweep)"
+        return 1
+    fi
+
+    # Step 6 — L3 write/readback on GPIO_DIR
+    orig_hex=$(spi_read $REG_GPIO_DIR) || return 1
+    orig=$(( 0x$orig_hex ))
+    test_val=$(( orig ^ 0x55 ))
+    test_hex=$(printf '%02x' $test_val)
+    spi_write $REG_GPIO_DIR $test_val || return 1
+    got=$(spi_read $REG_GPIO_DIR) || return 1
+    spi_write $REG_GPIO_DIR $orig || return 1
+    if [ "$got" != "$test_hex" ]; then
+        warn "attempt $attempt: write/readback (orig=0x$orig_hex wrote=0x$test_hex got=0x$got)"
+        return 1
+    fi
+
+    log "attempt $attempt OK (chip ID=0x$ver, sweep distinct=$distinct, write/readback OK)"
+    return 0
+}
+
+# ── Retry loop ──────────────────────────────────────────────────────────
+attempt=1
+while [ "$attempt" -le "$ATTEMPT_MAX" ]; do
+    log "attempt $attempt/$ATTEMPT_MAX"
+    if try_once "$attempt"; then
+        log "OK SX1302 fully operational"
+        exit 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$ATTEMPT_MAX" ] && sleep 2
 done
-distinct=$(echo $sweep | tr ' ' '\n' | sort -u | wc -l)
-[ "$distinct" -ge 2 ] \
-    || fail "register sweep returned only one distinct value ($sweep) — bus appears stuck"
-log "sweep =$sweep (distinct=$distinct, OK)"
 
-# ── 6. L3: write + readback on a writable register ──────────────────────
-log "step 6: write/readback on $REG_GPIO_DIR"
-orig_hex=$(spi_read $REG_GPIO_DIR)
-orig=$(( 0x$orig_hex ))
-test_val=$(( orig ^ 0x55 ))                   # XOR ensures different from current
-test_hex=$(printf '%02x' $test_val)
-spi_write $REG_GPIO_DIR $test_val
-got=$(spi_read $REG_GPIO_DIR)
-spi_write $REG_GPIO_DIR $orig                 # restore
-
-[ "$got" = "$test_hex" ] \
-    || fail "write/readback mismatch (orig=0x$orig_hex wrote=0x$test_hex got=0x$got)"
-log "write/readback OK (orig=0x$orig_hex wrote=0x$test_hex got=0x$got, restored)"
-
-log "OK SX1302 fully operational (power + reset + chip ID + sweep + write/readback)"
-exit 0
+giveup "SX1302 not operational after $ATTEMPT_MAX attempts"
+exit 1

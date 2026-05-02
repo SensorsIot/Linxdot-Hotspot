@@ -101,7 +101,7 @@ OpenLinxdot is a custom Buildroot-based firmware that turns a **Linxdot LD1001**
 **High-level flow:**
 ```
 BootROM → idbloader (SPL + DDR init) → TF-A BL31 → U-Boot → boot.scr
-  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S49ntp..S50sshd..S60ota..[S70<app>]
+  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S49ntp..S50sshd..S60ota..S70sx1302..[application]
   → application → external service (TTN LNS / etc.)
 ```
 S60ota is the consolidated OTA hook (acquire + commit). Application services
@@ -246,9 +246,15 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
   5. **L3 write/readback**: write a flipped pattern to GPIO_DIR (`0x4203`, harmless), read back, restore. Rules out "read-only zombie" failures where the chip echoes hardcoded values but internal state can't be mutated.
   
   Exit 0 only if all five steps pass.
-- `/etc/init.d/S30sx1302` — calls `sx1302-reset` before `S40network` so the chip is operational by the time userspace is up. Always exits 0 — a dead chip must not block OTA, since OTA is what ships the fix.
+- `/etc/init.d/S70sx1302` — calls `sx1302-reset` *after* `S60ota`. SX1302 is application infrastructure: the OTA layer is application-agnostic and must always run, even when the chip is broken, because OTA is the only remote path to ship a fix. Numbering S70 (after S60ota) enforces that ordering. On failure, S70 drives a **bounded reboot recovery loop** before giving up:
+  - `sx1302-reset` itself retries the full sequence up to 3 times in-process (Layer A — catches transient GPIO/SPI bring-up races, no init involvement).
+  - If the script still fails, S70 increments a counter at `/data/.sx1302-reboots` and reboots, capped at 3 reboots total (Layer B — catches sticky kernel-state issues that need a fresh boot).
+  - **Trial-boot safety**: when `upgrade_available=1` S70 *never* triggers its own reboot. The bootloader owns rollback in that state via bootcount / altbootcmd; competing with it would create incoherent flip-flopping. The previous slot (which was committed with a working chip) will be picked back up by the bootloader.
+  - **After REBOOT_MAX exhausted**: log "chip dead — leaving device for SSH/OTA diagnosis", exit 0, let init continue. Device stays SSH-reachable and OTA still works so a fix can ship.
+  - The counter at `/data/.sx1302-reboots` is cleared the moment a healthy boot is observed.
+- **Why not put chip-status in the OTA health-probe?** A health-probe-driven rollback would loop forever on a hardware-dead chip (both slots fail to commit → bootloader ping-pongs → unreachable device). The reboot counter on `/data` is bounded; a health-probe gate isn't. So chip-readiness stays out of the OTA layer's default probe; it's the application's probe (when added) that should care about it, with its own retry/recovery semantics.
 
-**Exit criteria:** On a clean boot, `S30sx1302` logs `OK SX1302 fully operational (power + reset + chip ID + sweep + write/readback)` via `logger -t sx1302`; manual re-runs of `/usr/sbin/sx1302-reset` exit 0; `cat /sys/class/gpio/gpio23/value` returns `1` post-boot.
+**Exit criteria:** On a clean boot, `S70sx1302` logs `attempt 1 OK ... OK SX1302 fully operational` via `logger -t sx1302` and exits 0 on the first attempt; manual re-runs of `/usr/sbin/sx1302-reset` exit 0; `cat /sys/class/gpio/gpio23/value` returns `1` post-boot. After a real failure: device completes recovery within 3 reboots if the failure is transient, or remains SSH-reachable with a clear log line if not.
 
 ## 5. Functional Requirements
 
@@ -579,7 +585,7 @@ The corollary is simple: **if your change must reach already-deployed devices wi
 |---|---|---|
 | Default config file (every device gets this baseline) | `board/linxdot/overlay/<path>` | Replaced on every OTA — your default ships in the new rootfs. |
 | Operator-customizable config | Document a `/data/<...>` override + a bind-mount or symlink in the init script (see `S01mountall`'s `/data/docker-compose.yml` pattern) | Operator's override survives OTA; firmware default is always the latest from the rootfs. |
-| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S49ntp` → `S50sshd` → `S60ota` → application services at `S70+`). The OTA layer must run before the application so a broken application image cannot block OTA acquisition; the application's own probe (`/etc/ota/health-probe`) gates the slot commit in phase 2. |
+| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S49ntp` → `S50sshd` → `S60ota` → `S70sx1302` → application services at `S71+`). The OTA layer must run before any application service (including SX1302 bring-up) so a broken application image cannot block OTA acquisition; the application's own probe (`/etc/ota/health-probe`) gates the slot commit in phase 2. |
 | New userspace tool / agent | `board/linxdot/overlay/usr/sbin/<name>`, or a Buildroot package under `package/<name>/` | Replaced on every OTA. |
 | Persistent application state | `/data/<your-app>/` — write at runtime, document the path | Survives OTA. **Never use `/var`, `/etc`, `/root`, `/home` as a "persistent" location** — see § 9.3. |
 | New kernel module (Phase 1–4) | Add prebuilt under `board/linxdot/modules/<kernel-version>/` (LFS-tracked) | Replaced on every OTA via `post-build.sh`. Add the file to the CI base-hash (§ 9.6). |
@@ -748,9 +754,12 @@ Two releases (`vN` and `vN+1`, same commit) are sufficient for the full happy-pa
 | **TC-6.5** | L1 chip ID | Step 4 of `sx1302-reset` reads `0x5610` | Log: `chip ID = 0x10 (OK)` | 0 |
 | **TC-6.6** | L2 register sweep | Step 5 reads 6 addresses (`0x5610, 0x5611, 0x5604, 0x5614, 0x5615, 0x4203`) | At least 2 distinct values across the 6 reads (rules out stuck SPI bus / zombie state); log `sweep =<values> (distinct=N, OK)` | 0 |
 | **TC-6.7** | L3 write/readback | Step 6 saves GPIO_DIR (`0x4203`) original value, writes XOR-flipped pattern, reads back, restores | Readback matches written value; log `write/readback OK (orig=0xNN wrote=0xNN got=0xNN, restored)` | 0 |
-| **TC-6.8** | Boot-time S30sx1302 hook | Power-cycle device, then SSH and grep `dmesg`/syslog for `sx1302` | `OK SX1302 fully operational` appears during boot, before `S40network` runs | 0 |
-| **TC-6.9** | Dead-chip resilience | Simulate by removing `spi-pipe` (e.g., `mv /usr/bin/spi-pipe /tmp/`), reboot | S30 logs failure (`spi-pipe not on PATH`) but exits 0; OTA layer (S60) still runs; device remains reachable via SSH. **Cleanup:** `mv /tmp/spi-pipe /usr/bin/` | 0 |
-| **TC-6.10** | Idempotent re-run | `/usr/sbin/sx1302-reset && /usr/sbin/sx1302-reset` (run twice) | Both runs exit 0; second run repeats the GPIO writes (fine — no harm) and re-verifies SPI; original GPIO_DIR value is preserved across both runs (since each restores it) | 0 |
+| **TC-6.8** | Boot-time S70sx1302 hook | Power-cycle device, then SSH and grep `dmesg`/syslog for `sx1302` | `OK SX1302 fully operational` appears during boot, *after* `S60ota` runs but before any application service | 0 |
+| **TC-6.9** | In-script retry (Layer A) | Force a transient failure: `chmod -x /usr/bin/spi-pipe; /usr/sbin/sx1302-reset & sleep 1; chmod +x /usr/bin/spi-pipe; wait` (then check exit code) | Script logs "attempt 1" failing (spi-pipe not executable), retries on attempt 2 or 3 once spi-pipe is restored, exits 0 with "attempt N OK" | 0 |
+| **TC-6.10** | Bounded reboot recovery (Layer B) | Simulate persistent failure on committed slot: `mv /usr/bin/spi-pipe /tmp/spi-pipe.bak; reboot` | After each boot: S70 fails Layer A (3 attempts × 5s ≈ 15s), then reboots; counter at `/data/.sx1302-reboots` increments 1→2→3; on the 4th boot S70 logs "chip dead after 3 recovery reboots — leaving device for SSH/OTA diagnosis" and exits 0; device is SSH-reachable, network is up, OTA still works. **Cleanup:** `mv /tmp/spi-pipe.bak /usr/bin/spi-pipe; rm /data/.sx1302-reboots; reboot` | 0 |
+| **TC-6.11** | Trial-boot safety (no S70-driven reboot during trial) | Simulate `upgrade_available=1` while chip is broken: `mv /usr/bin/spi-pipe /tmp/; fw_setenv upgrade_available 1; fw_setenv bootcount 0; reboot` | S70 fails Layer A but does NOT reboot (sees trial-boot flag); logs "trial boot in progress — leaving rollback to bootloader"; bootcount climbs across subsequent boots until altbootcmd flips back to the previous slot. **Cleanup**: `mv /tmp/spi-pipe /usr/bin/` | 0 |
+| **TC-6.12** | Counter clears on successful recovery | After a recovery reboot or two, restore the chip path mid-cycle (e.g., `mv /tmp/spi-pipe.bak /usr/bin/spi-pipe`) and let the next boot succeed | `/data/.sx1302-reboots` is removed by S70 on the successful boot; subsequent failures restart counting from 0 | 0 |
+| **TC-6.13** | Idempotent re-run | `/usr/sbin/sx1302-reset && /usr/sbin/sx1302-reset` (run twice on a healthy chip) | Both runs exit 0 on attempt 1; original GPIO_DIR value preserved across both runs (each restores it after L3) | 0 |
 
 **Suggested execution order:** TC-6.1, 6.2 (no-build observations) → 6.3 (verify spi-tools is in build) → 6.4 (full reset procedure end-to-end) → 6.5–6.7 (drill into individual L1/L2/L3 steps via the same script's logs) → 6.8 (boot-time path) → 6.9 (failure mode) → 6.10 (idempotence). **Build cost:** 1× cold rebuild for TC-6.3 if `spi-tools` wasn't already on, otherwise 0.
 
