@@ -1,0 +1,23 @@
+#!/bin/sh
+# S30sx1302 — bring up the SX1302 LoRa concentrator before OTA + application.
+#
+# Two-stage smoke test:
+#   1. sx1302-power: GPIO power-on + reset pulse with readback verification
+#   2. sx1302-check: read the chip version register (0x5610) over SPI
+#
+# Both steps log via `logger -t sx1302`. The script always exits 0 — even if
+# the chip is dead or absent we want OTA (S60) to keep running so we can
+# ship a fix. The application's /etc/ota/health-probe is the right place to
+# escalate "no chip" into "refuse to commit slot" once an application is in
+# the picture.
+
+case "$1" in
+    start) ;;
+    stop|*) exit 0 ;;
+esac
+
+/usr/sbin/sx1302-power || logger -t sx1302 "S30: power-on failed"
+sleep 1
+/usr/sbin/sx1302-check || logger -t sx1302 "S30: SPI chip-ID check failed"
+
+exit 0

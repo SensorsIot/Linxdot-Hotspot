@@ -232,6 +232,18 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 **Exit criteria:** All peripherals functional from in-tree DTS, no vendor DTB required.
 
+### 4.6 Phase 6 — SX1302 hardware bring-up (in progress, branch `test`)
+
+**Scope:** Layer minimal LoRa-concentrator hardware enablement on top of the OTA-only base, *without* re-introducing Docker / basicstation. Two scripts and one init hook prove the chip is electrically alive and answering SPI before any application is added at S70+.
+
+**Deliverables:**
+- `BR2_PACKAGE_SPI_TOOLS=y` in defconfig (provides `spi-pipe` for `/dev/spidev0.0` transactions; ~50 KB on target).
+- `/usr/sbin/sx1302-power` — GPIO power-on (`POWER_GPIO=23`, `EXTRA_GPIO=17`, `RESET_GPIO=15`) with sysfs readback verification. Adapted from main's vendor `reset.sh`, stripped of the docker / basicstation orchestration. Exit 0 = power applied, readback matches.
+- `/usr/sbin/sx1302-check` — reads the SX1302 version register `0x5610` over SPI via `spi-pipe`, expects `0x10`. Exit 0 = chip is alive on the bus.
+- `/etc/init.d/S30sx1302` — runs both above before `S40network` so the chip is up by the time userspace is up. Always exits 0 — a dead chip must not block OTA, since OTA is what ships the fix.
+
+**Exit criteria:** On a clean boot, `S30sx1302` logs both "OK power=1 extra=1 reset=0" and "OK chip is alive" via `logger -t sx1302`; manual re-runs of `/usr/sbin/sx1302-power` and `/usr/sbin/sx1302-check` exit 0; `cat /sys/class/gpio/gpio23/value` returns `1` post-boot.
+
 ## 5. Functional Requirements
 
 ### 5.1 Functional Requirements (FR)
@@ -719,7 +731,22 @@ Two releases (`vN` and `vN+1`, same commit) are sufficient for the full happy-pa
 
 **Suggested execution order** (build-cost-minimal): TC-4.1 → 4.2 → 4.3 (CI static checks) → 4.9 (cold boot) → 4.4 (happy path) → 4.10, 4.11 (free observations after 4.4) → 4.6 (rollback drill) → 4.7 (network block) → 4.8 (probe swap) → 4.5 (trial-boot phase split) → 4.12, 4.13 (manual triggers) → 4.14 (race regression) → 4.15, 4.16 (hostile / brick recovery — last). **Total CI build cost for the full plan: ≤ 4 release builds × ~2 min ≈ 8 min.**
 
-### 10.4 Traceability Matrix
+### 10.4 Phase 6 verification — SX1302 hardware bring-up
+
+| Test ID | Feature | Procedure | Expected | Build cost |
+|---|---|---|---|---|
+| **TC-6.1** | GPIO sysfs available | `ls /sys/class/gpio/` on device | `export`, `unexport`, `gpiochip0..128` (5 RK3566 banks) all present | 0 |
+| **TC-6.2** | `/dev/spidev0.0` exposed | `ls /dev/spidev*; readlink /sys/bus/spi/devices/spi0.0/driver` | `/dev/spidev0.0` exists; driver symlink points at `spidev` (not the legacy `sx1301` kernel driver) | 0 |
+| **TC-6.3** | `spi-pipe` binary present | `which spi-pipe; spi-pipe --help 2>&1 \| head -1` | Binary on PATH; help message printed (proves `BR2_PACKAGE_SPI_TOOLS=y` was honored at build time) | 1× cold rebuild (~30 min, only when defconfig changes) |
+| **TC-6.4** | Power-on with GPIO readback | `/usr/sbin/sx1302-power; echo $?; cat /sys/class/gpio/gpio23/value /sys/class/gpio/gpio17/value /sys/class/gpio/gpio15/value` | Exit 0; readback `1 1 0` for POWER, EXTRA, RESET; `logger -t sx1302` shows "OK power=1 extra=1 reset=0" | 0 |
+| **TC-6.5** | SPI version-register readback | `/usr/sbin/sx1302-power; sleep 1; /usr/sbin/sx1302-check` | Exit 0; log line `version register 0x5610 = 0x10`; "OK chip is alive" | 0 |
+| **TC-6.6** | Boot-time S30sx1302 hook | Power-cycle device, then `logread \| grep sx1302` (or check via `journalctl` equivalent) | Both "OK power=1 extra=1 reset=0" and "OK chip is alive" appear during boot, before `S40network` runs | 0 |
+| **TC-6.7** | Dead-chip resilience | Disconnect chip (or simulate by overriding sx1302-check to `exit 1`), reboot | S30 logs failure but exits 0; OTA layer (S60) still runs; device remains reachable via SSH | 0 |
+| **TC-6.8** | Idempotent re-run | `/usr/sbin/sx1302-power && /usr/sbin/sx1302-power` (run twice in a row) | Both runs exit 0; second run is a no-op (GPIOs already exported, values already commanded) | 0 |
+
+**Suggested execution order:** TC-6.1, 6.2 (no-build observations) → 6.3 (verify spi-tools is in build) → 6.4 (manual power-on) → 6.5 (manual chip-ID) → 6.6 (boot-time path) → 6.7 (failure mode) → 6.8 (idempotence). **Build cost:** 1× cold rebuild for TC-6.3 if `spi-tools` wasn't already on, otherwise 0.
+
+### 10.5 Traceability Matrix
 
 | Requirement | Priority | Test Case(s) | Status |
 |---|---|---|---|
