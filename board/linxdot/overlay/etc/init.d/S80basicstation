@@ -1,0 +1,70 @@
+#!/bin/sh
+# S80basicstation — start the Basics Station container via docker-compose.
+#
+# Minimal version: wait for dockerd, load TC_KEY (if configured), `compose up`.
+# Chip bring-up is owned by S70sx1302 on the host (not by reset.sh inside the
+# container); the container just runs basicstation.
+#
+# If /data/basicstation/tc_key.txt is absent or empty the container still
+# starts but won't be able to reach TTN — that's fine, the operator can drop
+# in the key and `restart` later.
+
+CONF=/etc/docker-compose.yml
+PROG=/usr/bin/docker-compose
+LOG=/var/log/docker-compose.log
+TC_KEY_FILE=/data/basicstation/tc_key.txt
+
+[ -x "$PROG" ] || exit 0
+
+say() {
+    echo "S80basicstation: $*"
+    logger -t basicstation "$*" 2>/dev/null || true
+    echo "$(date -Iseconds) $*" >> "$LOG" 2>/dev/null || true
+}
+
+load_tc_key() {
+    [ -f "$TC_KEY_FILE" ] || return 1
+    TC_KEY=$(grep -v '^#' "$TC_KEY_FILE" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    [ -n "$TC_KEY" ] && export TC_KEY && return 0
+    return 1
+}
+
+wait_for_docker() {
+    for i in $(seq 1 60); do
+        [ -S /var/run/docker.sock ] && docker info >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    say "ERROR dockerd not ready after 60s"
+    return 1
+}
+
+case "$1" in
+    start)
+        if ! load_tc_key; then
+            say "TC_KEY not configured at $TC_KEY_FILE — basicstation will start but won't reach TTN"
+        fi
+
+        say "waiting for Docker"
+        wait_for_docker || exit 0
+
+        export COMPOSE_HTTP_TIMEOUT=300
+        say "docker-compose pull"
+        $PROG -f "$CONF" pull >> "$LOG" 2>&1 || say "WARN pull failed (continuing with local image)"
+        say "docker-compose up -d"
+        $PROG -f "$CONF" up -d >> "$LOG" 2>&1
+        ;;
+    stop)
+        say "stopping container"
+        $PROG -f "$CONF" stop >> "$LOG" 2>&1
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,38 @@
+#!/bin/sh
+# S75dockerd — start Docker daemon with data on /data/docker.
+#
+# Numbered S75 (after S70sx1302, before S80basicstation) so it slots
+# cleanly between chip bring-up and the container that uses it.
+# /data/docker is created on first boot by S00datapart.
+
+PROG=/usr/bin/dockerd
+LOG=/var/log/dockerd.log
+
+[ -x "$PROG" ] || exit 0
+
+case "$1" in
+    start)
+        echo "S75dockerd: starting Docker engine"
+        mkdir -p /data/docker /var/run/docker
+        $PROG --data-root /data/docker \
+              -H unix:///var/run/docker.sock \
+              -G root \
+              --storage-driver overlay2 \
+              > "$LOG" 2>&1 &
+        ;;
+    stop)
+        echo "S75dockerd: stopping Docker engine"
+        killall dockerd 2>/dev/null
+        ;;
+    restart)
+        "$0" stop
+        sleep 2
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

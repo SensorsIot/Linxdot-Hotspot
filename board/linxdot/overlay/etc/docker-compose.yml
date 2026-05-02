@@ -15,3 +15,24 @@ services:
       TC_KEY: "${TC_KEY}"
     volumes:
       - /data/basicstation:/config
+    # Bring up the SX1302 from a known clean state on every container
+    # start. Datasheet sequence: hold RESET asserted, then bring rails
+    # up, settle, then release RESET. RESET_GPIO=0 above keeps the
+    # container's templated reset.sh as a no-op so it doesn't fire a
+    # second pulse on top of this. `restart: always` reruns this on
+    # every basicstation crash — that's the self-heal loop.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # docker-compose eats single $; double it so the shell sees $g.
+        for g in 15 23; do
+          [ -d /sys/class/gpio/gpio$$g ] || echo $$g > /sys/class/gpio/export
+          echo out > /sys/class/gpio/gpio$$g/direction
+        done
+        echo 1 > /sys/class/gpio/gpio15/value
+        echo 0 > /sys/class/gpio/gpio23/value; sleep 1
+        echo 1 > /sys/class/gpio/gpio23/value; sleep 1
+        echo 0 > /sys/class/gpio/gpio15/value
+        sleep 0.1
+        exec /app/start

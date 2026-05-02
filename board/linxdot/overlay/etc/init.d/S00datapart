@@ -54,43 +54,26 @@ case "$1" in
         mkdir -p /data
         mount -t ext4 -o noatime "$DATA_DEV" /data
 
-        # First boot: create skeleton directories and copy default configs
+        # First boot: create skeleton directories needed by the overlay mounts
+        # in S01mountall. /data is the only writable partition that survives
+        # OTA, so anything stateful (ota.conf overrides, /etc/ upper layer) has
+        # to land here.
         if [ ! -f /data/.initialized ]; then
             echo "S00datapart: first boot — creating data skeleton"
-            mkdir -p /data/docker
             mkdir -p /data/overlay/usr/upper /data/overlay/usr/work
             mkdir -p /data/overlay/var_log/upper /data/overlay/var_log/work
             mkdir -p /data/overlay/var_lib/upper /data/overlay/var_lib/work
             mkdir -p /data/overlay/etc/upper /data/overlay/etc/work
-            mkdir -p /data/basicstation
             mkdir -p /data/etc
 
-            # Create TC_KEY template for user to fill in
-            if [ ! -f /data/basicstation/tc_key.txt ]; then
-                cat > /data/basicstation/tc_key.txt << 'KEYEOF'
-# TTN API Key for Basics Station
-#
-# To connect to The Things Network:
-# 1. Go to https://console.cloud.thethings.network
-# 2. Create or select your gateway
-# 3. Generate an API key with "Link as Gateway to a Gateway Server" permission
-# 4. Replace the line below with your key (delete this comment block)
-#
-# Example: NNSXS.XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX.YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
-KEYEOF
-            fi
+            # Docker storage + basicstation config volume (referenced by
+            # /etc/docker-compose.yml). The container needs both to exist
+            # before dockerd starts.
+            mkdir -p /data/docker /data/basicstation
 
             touch /data/.initialized
             sync
         fi
-
-        # Migration: pre-v1.0.7 images copied reset.sh to /data and basicstation
-        # invoked it via STATION_RADIOINIT — but that double-reset (host + container)
-        # races the SX1250 PLL/TCXO settle and intermittently leaves the chip in
-        # reset on basicstation startup. v1.0.7 drops STATION_RADIOINIT and runs
-        # the rootfs reset.sh once, host-side, from S80dockercompose. The /data
-        # copy is no longer used by anything; remove it for clarity.
-        rm -f /data/basicstation/reset.sh
         ;;
     stop)
         ;;

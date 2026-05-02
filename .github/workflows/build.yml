@@ -61,8 +61,13 @@ jobs:
           for f in board/linxdot/overlay/etc/init.d/S00datapart \
                    board/linxdot/overlay/etc/init.d/S40network \
                    board/linxdot/overlay/etc/init.d/S50sshd \
-                   board/linxdot/overlay/etc/init.d/S60dockerd \
-                   board/linxdot/overlay/etc/init.d/S80dockercompose \
+                   board/linxdot/overlay/etc/init.d/S60ota \
+                   board/linxdot/overlay/etc/init.d/S75dockerd \
+                   board/linxdot/overlay/etc/init.d/S80basicstation \
+                   board/linxdot/overlay/etc/docker-compose.yml \
+                   board/linxdot/overlay/etc/ota/health-probe \
+                   board/linxdot/overlay/usr/sbin/linxdot-setup \
+                   board/linxdot/overlay/usr/sbin/set-eth-mac \
                    board/linxdot/overlay/etc/fw_env.config \
                    board/linxdot/genimage.cfg \
                    board/linxdot/post-build.sh \
