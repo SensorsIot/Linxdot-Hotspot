@@ -89,63 +89,110 @@ start_eth() {
     done
 
     echo "S40network: eth0 link detected, starting DHCP"
-    # Busybox udhcpc — DHCPCD was a docker-stack carry-over; the only client
-    # we ship for OTA-only is busybox's. -b backgrounds the daemon; the
-    # default lease script (/usr/share/udhcpc/default.script) wires
-    # resolv.conf + route on `bound`.
     udhcpc -b -i eth0 -p /var/run/udhcpc.eth0.pid
 
-    # Self-verify each step. udhcpc -b returns the moment it forks — long
-    # before negotiation finishes — so without explicit verification the
-    # next init script (S49ntp / clock-bootstrap) races the lease. ntpd
-    # then exits in <1 s with no sample, the clock stays in 2017, and
-    # S60ota's HTTPS manifest fetch fails cert validation. Each check
-    # below has its own bounded timeout; on miss we log loudly but exit
-    # 0 (boot must continue for OTA to be able to ship a fix).
+    # Self-verify each step. Continuing past a failed prerequisite is
+    # pointless — S49ntp without a route, S60ota without a clock, all
+    # fail 100%. So this function is "all or nothing": every check must
+    # pass within its own timeout, otherwise return 1 and let the caller
+    # decide (bounded-reboot recovery in start_eth_with_recovery).
 
-    # Step 1: default route present (lease arrived, route installed).
+    # Step 1: default route present (lease arrived).
     echo "S40network: verify default route"
     count=0
     while ! ip route get 1.1.1.1 >/dev/null 2>&1; do
         sleep 1
         count=$((count + 1))
         if [ $count -ge 30 ]; then
-            echo "S40network: WARN no default route after 30s — continuing without"
-            return 0
+            echo "S40network: FAIL no default route after 30s"
+            return 1
         fi
     done
     echo "S40network: default route up after ${count}s"
 
     # Step 2: /etc/resolv.conf populated (DNS configured).
-    # The udhcpc lease script writes route then resolv.conf; in practice
-    # both arrive together but the order isn't guaranteed across busybox
-    # versions, so check explicitly.
     count=0
     while [ ! -s /etc/resolv.conf ]; do
         sleep 1
         count=$((count + 1))
-        if [ $count -ge 5 ]; then
-            echo "S40network: WARN /etc/resolv.conf empty after 5s — DNS may fail"
-            break
+        if [ $count -ge 10 ]; then
+            echo "S40network: FAIL /etc/resolv.conf empty after 10s"
+            return 1
         fi
     done
 
-    # Step 3: actual outbound reachability. ICMP echo to Cloudflare DNS
-    # (1.1.1.1) — no DNS resolution needed, no TLS (clock is still bad
-    # at this point so HTTPS would always fail), and 1.1.1.1 is one of
-    # the most reachable hosts on the public internet. Three attempts
-    # because the first ARP/route exchange after DHCP can drop a packet.
-    echo "S40network: verify connectivity (ping 1.1.1.1)"
+    # Step 3: DNS actually resolves a real name — exercises resolv.conf
+    # AND the upstream resolver. nslookup is the busybox-portable test;
+    # we resolve pool.ntp.org because that's literally the next caller's
+    # target and a failure here predicts S49ntp's failure mode exactly.
+    echo "S40network: verify DNS (nslookup pool.ntp.org)"
     count=0
-    while ! ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; do
+    until nslookup pool.ntp.org >/dev/null 2>&1; do
         count=$((count + 1))
-        if [ $count -ge 3 ]; then
-            echo "S40network: WARN ping 1.1.1.1 failed after 3 attempts — downstream OTA/NTP may fail"
-            return 0
+        if [ $count -ge 6 ]; then
+            echo "S40network: FAIL DNS resolution failed after 6 tries"
+            return 1
         fi
         sleep 2
     done
-    echo "S40network: connectivity OK after $((count + 1)) attempt(s)"
+    echo "S40network: DNS OK after $count retries"
+
+    # Step 4: ICMP reachability. No DNS, no TLS — confirms IP routing
+    # actually delivers packets. 1.1.1.1 is chosen because it's stateless
+    # and one of the most reachable hosts on the internet.
+    echo "S40network: verify connectivity (ping 1.1.1.1)"
+    count=0
+    until ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; do
+        count=$((count + 1))
+        if [ $count -ge 3 ]; then
+            echo "S40network: FAIL ping 1.1.1.1 after 3 attempts"
+            return 1
+        fi
+        sleep 2
+    done
+    echo "S40network: ping OK after $count retries"
+    return 0
+}
+
+# Bounded-reboot recovery wrapper. Same pattern as S70sx1302: try the
+# whole start_eth() sequence; on failure, reboot (counter on /data,
+# capped at REBOOT_MAX). Trial-boot safety: don't reboot during a
+# trial-boot OTA — the bootloader already owns rollback in that state
+# and we'd race its bootcount machinery. After exhausting reboots:
+# log loudly, exit 0, let init continue for SSH diagnosis (the device
+# is then unable to OTA but at least reachable on the local LAN).
+start_eth_with_recovery() {
+    COUNTER=/data/.s40-reboots
+    REBOOT_MAX=3
+
+    if start_eth; then
+        rm -f "$COUNTER"
+        return 0
+    fi
+
+    logger -t S40network "verification failed — next steps would 100% fail"
+
+    if [ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ]; then
+        logger -t S40network "trial boot — leaving rollback to bootloader"
+        return 0
+    fi
+
+    count=0
+    [ -f "$COUNTER" ] && count=$(cat "$COUNTER" 2>/dev/null || echo 0)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+
+    if [ "$count" -ge "$REBOOT_MAX" ]; then
+        logger -t S40network "FAIL after $REBOOT_MAX recovery reboots — leaving for SSH/OTA diagnosis"
+        return 0
+    fi
+
+    count=$((count + 1))
+    echo "$count" > "$COUNTER"
+    sync
+    logger -t S40network "rebooting to recover network ($count/$REBOOT_MAX)"
+    sleep 5
+    reboot
+    return 0
 }
 
 stop_eth() {
@@ -156,7 +203,7 @@ stop_eth() {
 case "$1" in
     start)
         start_lo
-        start_eth
+        start_eth_with_recovery
         ;;
     stop)
         stop_eth
@@ -164,7 +211,7 @@ case "$1" in
     restart)
         stop_eth
         sleep 1
-        start_eth
+        start_eth_with_recovery
         ;;
     *)
         echo "Usage: $0 {start|stop|restart}"

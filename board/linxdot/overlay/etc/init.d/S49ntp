@@ -35,33 +35,74 @@ clean_stale_overlay_conf() {
 
 bootstrap_clock() {
     # Self-verify: clock-bootstrap reports its own success/failure but
-    # we ALSO check that the wall-clock is actually in 2024+ before
-    # declaring this step done. If the first attempt didn't step the
-    # clock, wait 5 s (gives the disciplining ntpd's first sample a
-    # chance to arrive) and try once more. Two attempts cap the cost
-    # at ~95 s worst-case (3 servers × 30 s watchdog × 2). A failure
-    # is logged but does not block boot — S60ota's HTTPS will fail
-    # cert validation cleanly and the next boot retries.
+    # we ALSO check the wall-clock is actually in 2024+ before declaring
+    # this step done. Continuing to S60ota with a stale clock is
+    # pointless — HTTPS cert validation will 100% fail. So this function
+    # returns success only when the clock is provably stepped; the
+    # caller (bootstrap_clock_with_recovery) handles the failure path
+    # with a bounded reboot.
+    #
+    # Three attempts × up to 90 s each (3 servers × 30 s watchdog) =
+    # up to ~270 s worst case. The 10 s sleep between attempts gives
+    # the disciplining daemon's async sample a chance to arrive.
     [ -x /usr/sbin/clock-bootstrap ] || return 0
 
-    for attempt in 1 2; do
+    for attempt in 1 2 3; do
         /usr/sbin/clock-bootstrap || true
         year=$(date -u +%Y)
         if [ "$year" -ge 2024 ]; then
             logger -t S49ntp "clock OK on attempt ${attempt} ($(date -u))"
             return 0
         fi
-        logger -t S49ntp "WARN clock-bootstrap attempt ${attempt} did not step clock (year=$year)"
-        [ "$attempt" -eq 1 ] && sleep 5
+        logger -t S49ntp "clock-bootstrap attempt ${attempt}/3 did not step clock (year=$year)"
+        [ "$attempt" -lt 3 ] && sleep 10
     done
 
-    logger -t S49ntp "WARN clock left at $(date -u) — OTA HTTPS will fail until next boot recovers"
+    logger -t S49ntp "FAIL clock left at $(date -u) — S60ota HTTPS would 100% fail"
     return 1
+}
+
+# Bounded-reboot recovery wrapper. Same pattern as S70sx1302: if
+# bootstrap_clock can't step the clock after its internal retries,
+# reboot (counter on /data, capped at REBOOT_MAX). Trial-boot safety:
+# don't reboot during upgrade_available=1; bootloader rollback is
+# already running. After exhausting reboots: log loudly, return,
+# let init continue for SSH diagnosis (S60ota will fail cleanly).
+bootstrap_clock_with_recovery() {
+    COUNTER=/data/.s49-reboots
+    REBOOT_MAX=3
+
+    if bootstrap_clock; then
+        rm -f "$COUNTER"
+        return 0
+    fi
+
+    if [ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ]; then
+        logger -t S49ntp "trial boot — leaving rollback to bootloader"
+        return 0
+    fi
+
+    count=0
+    [ -f "$COUNTER" ] && count=$(cat "$COUNTER" 2>/dev/null || echo 0)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+
+    if [ "$count" -ge "$REBOOT_MAX" ]; then
+        logger -t S49ntp "FAIL after $REBOOT_MAX recovery reboots — leaving for SSH/OTA diagnosis"
+        return 0
+    fi
+
+    count=$((count + 1))
+    echo "$count" > "$COUNTER"
+    sync
+    logger -t S49ntp "rebooting to recover clock ($count/$REBOOT_MAX)"
+    sleep 5
+    reboot
+    return 0
 }
 
 start() {
     clean_stale_overlay_conf
-    bootstrap_clock
+    bootstrap_clock_with_recovery
     printf 'Starting %s: ' "$DAEMON"
     # shellcheck disable=SC2086 # we need word splitting on NTPD_ARGS
     start-stop-daemon -S -q -p "$PIDFILE" -x "/usr/sbin/$DAEMON" \
