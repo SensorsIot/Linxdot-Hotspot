@@ -34,6 +34,14 @@ fi
 echo ">>> Setting init script permissions"
 chmod +x "${TARGET_DIR}"/etc/init.d/S* 2>/dev/null || true
 
+# ── Drop the Buildroot-default S60dockerd ──
+# BR2_PACKAGE_DOCKER_ENGINE ships /etc/init.d/S60dockerd that starts dockerd
+# with no args, so it ends up using /var/lib/docker (rootfs overlay) instead
+# of /data/docker. Our overlay's S75dockerd is the canonical one — has the
+# right --data-root and the right ordering (after S70sx1302-power, before
+# S80basicstation). Remove the duplicate.
+rm -f "${TARGET_DIR}/etc/init.d/S60dockerd"
+
 # ── Create required directories ──
 mkdir -p "${TARGET_DIR}/data"
 mkdir -p "${TARGET_DIR}/var/log"

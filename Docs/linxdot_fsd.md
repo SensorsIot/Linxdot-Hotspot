@@ -101,7 +101,7 @@ OpenLinxdot is a custom Buildroot-based firmware that turns a **Linxdot LD1001**
 **High-level flow:**
 ```
 BootROM → idbloader (SPL + DDR init) → TF-A BL31 → U-Boot → boot.scr
-  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S49ntp..S50sshd..S60ota..S70sx1302..[application]
+  → Linux 5.15.104 → BusyBox init → S00datapart..S40network..S49ntp..S50sshd..S60ota..S75dockerd..S80basicstation
   → application → external service (TTN LNS / etc.)
 ```
 S60ota is the consolidated OTA hook (acquire + commit). Application services
@@ -234,27 +234,30 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 
 ### 4.6 Phase 6 — SX1302 hardware bring-up (in progress, branch `test`)
 
-**Scope:** Layer minimal LoRa-concentrator hardware enablement on top of the OTA-only base, *without* re-introducing Docker / basicstation. Two scripts and one init hook prove the chip is electrically alive and answering SPI before any application is added at S70+.
+**Scope:** Move all SX1302 / SX1250 bring-up into the basicstation container. The host is uninvolved; `restart: always` plus a power-cycling entrypoint is the self-heal loop.
+
+**Why container-owned:**
+- SX1250 init via libloragw fails (`Failed to set SX1250_0 in STANDBY_RC mode`, status `0x08`) when the LoRa rail isn't power-cycled before each `lgw_start` attempt — the SX1250 TCXO doesn't reliably restart from a half-init state. The container's templated `reset.sh.legacy` only pulses `RESET_GPIO`; it never drops `POWER_EN_GPIO` to 0 first. So the templated script alone is insufficient for this hardware (commit `589de2c` in `test` branch documents the failure mode).
+- Doing the reset host-side worked for the *first* `lgw_start`, but station crashes on SX1250 init exit the container, docker re-launches via `restart: always`, and the new attempt sees a chip in degraded state (`chip version 0x05` instead of `0x10`) with no fresh reset. So self-heal requires the reset to run on every container start — and the container is the natural owner of "every container start".
 
 **Deliverables:**
-- `BR2_PACKAGE_SPI_TOOLS=y` in defconfig (provides `spi-pipe` for `/dev/spidev0.0` transactions; ~50 KB on target).
-- `/usr/sbin/sx1302-reset` — single script that owns the entire bring-up. The chip-readiness check is **part of the reset procedure**, not a separate diagnostic, because that's where it conceptually belongs: a "reset" that doesn't verify the chip came back is a reset that lies. Sequence:
-  1. **Power rails**: drop POWER (gpio 23) + EXTRA (gpio 17) to 0, settle, raise to 1.
-  2. **Reset pulse**: drive RESET (gpio 15) high, settle, drive low (release).
-  3. **L1 chip ID**: read VERSION register `0x5610`, expect `0x10`.
-  4. **L2 register sweep**: read 6 addresses, require ≥2 distinct values (rules out stuck-bus failures where every read returns the same byte).
-  5. **L3 write/readback**: write a flipped pattern to GPIO_DIR (`0x4203`, harmless), read back, restore. Rules out "read-only zombie" failures where the chip echoes hardcoded values but internal state can't be mutated.
-  
-  Exit 0 only if all five steps pass.
-- `/etc/init.d/S70sx1302` — calls `sx1302-reset` *after* `S60ota`. SX1302 is application infrastructure: the OTA layer is application-agnostic and must always run, even when the chip is broken, because OTA is the only remote path to ship a fix. Numbering S70 (after S60ota) enforces that ordering. On failure, S70 drives a **bounded reboot recovery loop** before giving up:
-  - `sx1302-reset` itself retries the full sequence up to 3 times in-process (Layer A — catches transient GPIO/SPI bring-up races, no init involvement).
-  - If the script still fails, S70 increments a counter at `/data/.sx1302-reboots` and reboots, capped at 3 reboots total (Layer B — catches sticky kernel-state issues that need a fresh boot).
-  - **Trial-boot safety**: when `upgrade_available=1` S70 *never* triggers its own reboot. The bootloader owns rollback in that state via bootcount / altbootcmd; competing with it would create incoherent flip-flopping. The previous slot (which was committed with a working chip) will be picked back up by the bootloader.
-  - **After REBOOT_MAX exhausted**: log "chip dead — leaving device for SSH/OTA diagnosis", exit 0, let init continue. Device stays SSH-reachable and OTA still works so a fix can ship.
-  - The counter at `/data/.sx1302-reboots` is cleared the moment a healthy boot is observed.
-- **Why not put chip-status in the OTA health-probe?** A health-probe-driven rollback would loop forever on a hardware-dead chip (both slots fail to commit → bootloader ping-pongs → unreachable device). The reboot counter on `/data` is bounded; a health-probe gate isn't. So chip-readiness stays out of the OTA layer's default probe; it's the application's probe (when added) that should care about it, with its own retry/recovery semantics.
+- `docker-compose.yml` `entrypoint:` — 4-line shell that drops GPIO 23 to 0, settles 1 s, raises to 1, settles 1 s, then `exec /app/start`. Inside the privileged container, `/sys/class/gpio` writes go straight to the host kernel's GPIO subsystem.
+- `RESET_GPIO: 15` env var — the templated `reset.sh.legacy` then handles the SX1302 reset *pulse* (which it does correctly); we just needed to add the power cycle that template doesn't do.
+- `post-build.sh` removes the BR2 default `S60dockerd` (which starts dockerd with no args and ends up using `/var/lib/docker` overlay instead of `/data/docker`); our `S75dockerd` is the canonical one.
 
-**Exit criteria:** On a clean boot, `S70sx1302` logs `attempt 1 OK ... OK SX1302 fully operational` via `logger -t sx1302` and exits 0 on the first attempt; manual re-runs of `/usr/sbin/sx1302-reset` exit 0; `cat /sys/class/gpio/gpio23/value` returns `1` post-boot. After a real failure: device completes recovery within 3 reboots if the failure is transient, or remains SSH-reachable with a clear log line if not.
+**No host-side SX1302 init script.** `S70sx1302-power` and `usr/sbin/sx1302-power` are deleted. The DT marks `vcc3v3-lora` as `regulator-always-on`, so the rail is energised at kernel boot regardless of any userspace action; the container's first run owns the actual power cycle from there.
+
+**Self-heal loop:**
+```
+container starts → entrypoint power-cycles GPIO 23 → exec /app/start
+  → reset.sh pulses GPIO 15 → chip_id reads VERSION (0x10)
+  → station calls lgw_start → SX1250 init OK → station runs forever
+                            → SX1250 init FAIL → station exits → container exits
+                              → docker restart: always → loop back to "container starts"
+```
+Bounded only by docker's restart cadence (~5 s per attempt). On genuinely dead hardware the device stays SSH-able and OTA-able while basicstation churns harmlessly.
+
+**Exit criteria:** `docker logs basicstation` shows `Chip ID: <16-hex-char EUI>` with `EUI Source: chip`, then `[lgw_connect:1192] chip version is 0x10 (v1.0)`, then `Connected to MUXS`, then no `lgw_start: failed` error within ~30 s of basicstation start. Once a TC key is configured, the gateway is operational.
 
 ## 5. Functional Requirements
 
@@ -585,7 +588,7 @@ The corollary is simple: **if your change must reach already-deployed devices wi
 |---|---|---|
 | Default config file (every device gets this baseline) | `board/linxdot/overlay/<path>` | Replaced on every OTA — your default ships in the new rootfs. |
 | Operator-customizable config | Document a `/data/<...>` override + a bind-mount or symlink in the init script (see `S01mountall`'s `/data/docker-compose.yml` pattern) | Operator's override survives OTA; firmware default is always the latest from the rootfs. |
-| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S49ntp` → `S50sshd` → `S60ota` → `S70sx1302` → application services at `S71+`). The OTA layer must run before any application service (including SX1302 bring-up) so a broken application image cannot block OTA acquisition; the application's own probe (`/etc/ota/health-probe`) gates the slot commit in phase 2. |
+| New init script | `board/linxdot/overlay/etc/init.d/S##name` | Replaced on every OTA. Keep `S##` numbering ordered around existing scripts (boot order matters: `S00datapart` → `S01mountall` → `S40network` → `S49ntp` → `S50sshd` → `S60ota` → `S75dockerd` → `S80basicstation`). The OTA layer must run before any application service so a broken application image cannot block OTA acquisition; the application's own probe (`/etc/ota/health-probe`) gates the slot commit in phase 2. |
 | New userspace tool / agent | `board/linxdot/overlay/usr/sbin/<name>`, or a Buildroot package under `package/<name>/` | Replaced on every OTA. |
 | Persistent application state | `/data/<your-app>/` — write at runtime, document the path | Survives OTA. **Never use `/var`, `/etc`, `/root`, `/home` as a "persistent" location** — see § 9.3. |
 | New kernel module (Phase 1–4) | Add prebuilt under `board/linxdot/modules/<kernel-version>/` (LFS-tracked) | Replaced on every OTA via `post-build.sh`. Add the file to the CI base-hash (§ 9.6). |
@@ -745,23 +748,20 @@ Two releases (`vN` and `vN+1`, same commit) are sufficient for the full happy-pa
 
 ### 10.4 Phase 6 verification — SX1302 hardware bring-up
 
+Container owns power + reset; the host runs no SX1302 logic. Tests are no-build — observable on any v1.7.0+ device.
+
 | Test ID | Feature | Procedure | Expected | Build cost |
 |---|---|---|---|---|
-| **TC-6.1** | GPIO sysfs available | `ls /sys/class/gpio/` on device | `export`, `unexport`, `gpiochip0..128` (5 RK3566 banks) all present | 0 |
-| **TC-6.2** | `/dev/spidev0.0` exposed | `ls /dev/spidev*; readlink /sys/bus/spi/devices/spi0.0/driver` | `/dev/spidev0.0` exists; driver symlink points at `spidev` (not the legacy `sx1301` kernel driver) | 0 |
-| **TC-6.3** | `spi-pipe` binary present | `which spi-pipe; spi-pipe --help 2>&1 \| head -1` | Binary on PATH; help message printed (proves `BR2_PACKAGE_SPI_TOOLS=y` was honored at build time) | 1× cold rebuild (~30 min, only when defconfig changes) |
-| **TC-6.4** | Reset procedure end-to-end | `/usr/sbin/sx1302-reset; echo $?` | Exit 0; final log line `OK SX1302 fully operational (power + reset + chip ID + sweep + write/readback)`; intermediate logs show all 6 steps (power rails, reset pulse, GPIO state, chip ID, sweep, write/readback) passing in order | 0 |
-| **TC-6.5** | L1 chip ID | Step 4 of `sx1302-reset` reads `0x5610` | Log: `chip ID = 0x10 (OK)` | 0 |
-| **TC-6.6** | L2 register sweep | Step 5 reads 6 addresses (`0x5610, 0x5611, 0x5604, 0x5614, 0x5615, 0x4203`) | At least 2 distinct values across the 6 reads (rules out stuck SPI bus / zombie state); log `sweep =<values> (distinct=N, OK)` | 0 |
-| **TC-6.7** | L3 write/readback | Step 6 saves GPIO_DIR (`0x4203`) original value, writes XOR-flipped pattern, reads back, restores | Readback matches written value; log `write/readback OK (orig=0xNN wrote=0xNN got=0xNN, restored)` | 0 |
-| **TC-6.8** | Boot-time S70sx1302 hook | Power-cycle device, then SSH and grep `dmesg`/syslog for `sx1302` | `OK SX1302 fully operational` appears during boot, *after* `S60ota` runs but before any application service | 0 |
-| **TC-6.9** | In-script retry (Layer A) | Force a transient failure: `chmod -x /usr/bin/spi-pipe; /usr/sbin/sx1302-reset & sleep 1; chmod +x /usr/bin/spi-pipe; wait` (then check exit code) | Script logs "attempt 1" failing (spi-pipe not executable), retries on attempt 2 or 3 once spi-pipe is restored, exits 0 with "attempt N OK" | 0 |
-| **TC-6.10** | Bounded reboot recovery (Layer B) | Simulate persistent failure on committed slot: `mv /usr/bin/spi-pipe /tmp/spi-pipe.bak; reboot` | After each boot: S70 fails Layer A (3 attempts × 5s ≈ 15s), then reboots; counter at `/data/.sx1302-reboots` increments 1→2→3; on the 4th boot S70 logs "chip dead after 3 recovery reboots — leaving device for SSH/OTA diagnosis" and exits 0; device is SSH-reachable, network is up, OTA still works. **Cleanup:** `mv /tmp/spi-pipe.bak /usr/bin/spi-pipe; rm /data/.sx1302-reboots; reboot` | 0 |
-| **TC-6.11** | Trial-boot safety (no S70-driven reboot during trial) | Simulate `upgrade_available=1` while chip is broken: `mv /usr/bin/spi-pipe /tmp/; fw_setenv upgrade_available 1; fw_setenv bootcount 0; reboot` | S70 fails Layer A but does NOT reboot (sees trial-boot flag); logs "trial boot in progress — leaving rollback to bootloader"; bootcount climbs across subsequent boots until altbootcmd flips back to the previous slot. **Cleanup**: `mv /tmp/spi-pipe /usr/bin/` | 0 |
-| **TC-6.12** | Counter clears on successful recovery | After a recovery reboot or two, restore the chip path mid-cycle (e.g., `mv /tmp/spi-pipe.bak /usr/bin/spi-pipe`) and let the next boot succeed | `/data/.sx1302-reboots` is removed by S70 on the successful boot; subsequent failures restart counting from 0 | 0 |
-| **TC-6.13** | Idempotent re-run | `/usr/sbin/sx1302-reset && /usr/sbin/sx1302-reset` (run twice on a healthy chip) | Both runs exit 0 on attempt 1; original GPIO_DIR value preserved across both runs (each restores it after L3) | 0 |
+| **TC-6.1** | `/dev/spidev0.0` exposed | `ls /dev/spidev*; readlink /sys/bus/spi/devices/spi0.0/driver` | `/dev/spidev0.0` exists; driver symlink points at `spidev` | 0 |
+| **TC-6.2** | No host-side SX1302 init | `ls /etc/init.d/ \| grep -i sx1302; ls /usr/sbin/ \| grep -i sx1302` | Both empty. The container is the only thing that touches the chip. | 0 |
+| **TC-6.3** | No duplicate dockerd | `ls /etc/init.d/S*dockerd*; ps w \| grep '[d]ockerd'; docker info \| grep 'Docker Root Dir'` | Only `S75dockerd` present (BR2 default removed by `post-build.sh`). Single `dockerd` process. Root dir = `/data/docker`. | 0 |
+| **TC-6.4** | Container entrypoint power-cycles | `docker logs basicstation 2>&1 \| head -5` shows the entrypoint shell ran (sysfs GPIO writes succeeded) before the basicstation banner | No `cannot write` or `permission denied` lines from the GPIO writes; the basicstation banner appears within ~3 s | 0 |
+| **TC-6.5** | Chip read by libloragw | `docker logs basicstation 2>&1 \| grep -E 'Chip ID\|EUI Source\|chip version'` | `EUI Source: chip` (not `eth0`); `Chip ID:` 16 hex chars matching `Gateway EUI:`; `chip version is 0x10 (v1.0)` | 0 |
+| **TC-6.6** | SX1250 radio init succeeds | `docker logs basicstation 2>&1 \| grep -E 'lgw_start\|SX1250_0\|STANDBY_RC'` | No `failed to setup radio 0`, no `Failed to set SX1250_0 in STANDBY_RC mode`. Implies the entrypoint power cycle was effective. | 0 |
+| **TC-6.7** | TTN handshake | `docker logs basicstation 2>&1 \| grep -i muxs` | `Connected to MUXS` appears within ~30 s of basicstation start (TC key required). | 0 |
+| **TC-6.8** | Self-heal on transient failure | Force a single failed start: `docker exec basicstation kill -9 1` (or pull the antenna and let the chip mis-init). Observe `docker logs basicstation` across 1–2 restarts. | Each restart re-runs the entrypoint power cycle (visible in logs), then attempts `lgw_start`. Success on the first or second retry once the transient clears. `docker inspect basicstation \| grep RestartCount` increments. | 0 |
 
-**Suggested execution order:** TC-6.1, 6.2 (no-build observations) → 6.3 (verify spi-tools is in build) → 6.4 (full reset procedure end-to-end) → 6.5–6.7 (drill into individual L1/L2/L3 steps via the same script's logs) → 6.8 (boot-time path) → 6.9 (failure mode) → 6.10 (idempotence). **Build cost:** 1× cold rebuild for TC-6.3 if `spi-tools` wasn't already on, otherwise 0.
+**Suggested execution order:** 6.1, 6.2, 6.3 (hygiene checks, instant) → 6.4 (entrypoint actually ran) → 6.5, 6.6 (chip + radio alive) → 6.7 (TTN reachable) → 6.8 (self-heal proof). **Build cost: 0** — every step is observable on any v1.7.0+ device.
 
 ### 10.5 Traceability Matrix
 
