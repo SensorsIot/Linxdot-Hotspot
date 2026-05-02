@@ -100,7 +100,7 @@ The wizard records your cluster choice in `/data/basicstation/region.env` (a sin
 ```bash
 ssh root@<device-ip>
 echo TTS_REGION=nam1 > /data/basicstation/region.env   # eu1 | nam1 | au1 | as1
-/etc/init.d/S80dockercompose restart
+/etc/init.d/S80basicstation restart
 ```
 
 The rootfs `docker-compose.yml` reads `${TTS_REGION:-eu1}`, so the env file overrides the default. It lives on `/data` and survives OTA updates.
@@ -111,7 +111,7 @@ The rootfs `docker-compose.yml` reads `${TTS_REGION:-eu1}`, so the env file over
 
 **What you do:** nothing — once a device is online and registered with TTN, it keeps itself current. Your TTN key, region setting, and any data on `/data` survive every update and every rollback.
 
-**When updates trigger:** **once per boot**, ~60 s after the network comes up. The `ota-check` script polls the GitHub Releases feed for this repo and installs the newest release if it's newer than what's running. There is **no periodic timer** — a gateway that stays powered on for weeks will keep its current version until something reboots it. If you want regular pickup on a 24/7 device, either schedule a weekly reboot or wire `ota-check` into a cron entry yourself.
+**When updates trigger:** **once per boot**, immediately after NTP syncs the clock (S60ota runs after S49ntp). The `ota-check` script polls the GitHub Releases feed for this repo and installs the newest release if it's newer than what's running. There is **no periodic timer** — a gateway that stays powered on for weeks will keep its current version until something reboots it. If you want regular pickup on a 24/7 device, either schedule a weekly reboot or wire `ota-check` into a cron entry yourself.
 
 **Trigger a check manually**, no reboot required:
 
@@ -128,7 +128,7 @@ If a newer version is available it'll download, verify, install, and reboot — 
 3. SWUpdate writes the new boot + rootfs to the **inactive A/B slot** (the running slot is untouched, so basicstation keeps serving traffic until the reboot)
 4. U-Boot env is flipped: `boot_slot` switches, `upgrade_available=1` arms a 3-reboot trial window
 5. Device reboots into the new slot — brief LoRa outage (~30-60 s) while basicstation comes back
-6. A boot-time `S98confirm` health check (Docker up, basicstation up) clears `upgrade_available` and commits the upgrade
+6. On the next boot, S60ota's phase-2 health-probe confirms the new slot is healthy and commits the upgrade by clearing `upgrade_available`
 
 **If something goes wrong:** the new slot's health check doesn't pass → bootcount climbs past 3 → U-Boot's `altbootcmd` automatically flips back to the previous slot on the next boot. No screwdriver, no truck roll. The failed slot stays around for diagnostics; the next successful update overwrites it.
 
@@ -144,7 +144,7 @@ If a newer version is available it'll download, verify, install, and reboot — 
 | No network after boot | Connect Ethernet **before** powering on; check router DHCP leases. |
 | `TC_KEY: NOT CONFIGURED` | Step 4 didn't complete — re-run `linxdot-setup` to retry TTN registration. |
 | `ota-check` fails with `SSL certificate problem: certificate is not yet valid` | Stale kernel clock (LD1001 has no battery RTC). One-time fix on older devices: `killall ntpd; /usr/sbin/ntpd -gq pool.ntp.org; /etc/init.d/S49ntp start; ota-check`. Once you've upgraded to the latest release, the clock is stepped automatically at every boot. |
-| `EUI Source: eth0` instead of `chip` | Concentrator not reset. Power-cycle the device, or run `/opt/packet_forwarder/tools/reset_lgw.sh.linxdot start`. |
+| `EUI Source: eth0` instead of `chip` | Concentrator not reset. `docker restart basicstation` re-fires the container entrypoint that power-cycles the SX1302 rail; or just power-cycle the device. |
 | Gateway not showing on TTN | Verify EUI matches registration; `docker logs basicstation` for connection errors. |
 | Repeated `excessive clock drifts (... ppm, threshold 100ppm)` | SX1302 reference oscillator drift. Cosmetic for the LNS link, but degrades RX timing on class-B/C — log a hardware issue if persistent. |
 
@@ -184,7 +184,7 @@ Run on the device after `ssh root@<device-ip>`:
 | `ota-check` | Trigger an OTA check now. Installs + reboots if a newer release is on GitHub. |
 | `cat /etc/os-release \| grep VERSION_ID` | Show the running firmware version. |
 | `fw_printenv boot_slot bootcount upgrade_available` | For OTA debugging: A/B slot, consecutive boot attempts (non-zero = trial slot failing health checks), and the trial-boot flag. |
-| `/etc/init.d/S80dockercompose restart` | Restart basicstation (after editing `/data/basicstation/region.env`, etc.). |
+| `/etc/init.d/S80basicstation restart` | Restart basicstation (after editing `/data/basicstation/region.env`, etc.). |
 | `linxdot-setup` | Re-run the setup wizard. After setup is complete it prints status only; `rm /data/.setup-state` first to actually re-provision. |
 
 ## For developers
