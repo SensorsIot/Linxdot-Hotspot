@@ -34,10 +34,29 @@ clean_stale_overlay_conf() {
 }
 
 bootstrap_clock() {
-    # Idempotent: no-op if year >= 2024. On a stale clock this runs
-    # `ntpd -gq <server>` and exits in ~7 s with an unreachable list
-    # bounded by a 30 s/server watchdog.
-    [ -x /usr/sbin/clock-bootstrap ] && /usr/sbin/clock-bootstrap || true
+    # Self-verify: clock-bootstrap reports its own success/failure but
+    # we ALSO check that the wall-clock is actually in 2024+ before
+    # declaring this step done. If the first attempt didn't step the
+    # clock, wait 5 s (gives the disciplining ntpd's first sample a
+    # chance to arrive) and try once more. Two attempts cap the cost
+    # at ~95 s worst-case (3 servers × 30 s watchdog × 2). A failure
+    # is logged but does not block boot — S60ota's HTTPS will fail
+    # cert validation cleanly and the next boot retries.
+    [ -x /usr/sbin/clock-bootstrap ] || return 0
+
+    for attempt in 1 2; do
+        /usr/sbin/clock-bootstrap || true
+        year=$(date -u +%Y)
+        if [ "$year" -ge 2024 ]; then
+            logger -t S49ntp "clock OK on attempt ${attempt} ($(date -u))"
+            return 0
+        fi
+        logger -t S49ntp "WARN clock-bootstrap attempt ${attempt} did not step clock (year=$year)"
+        [ "$attempt" -eq 1 ] && sleep 5
+    done
+
+    logger -t S49ntp "WARN clock left at $(date -u) — OTA HTTPS will fail until next boot recovers"
+    return 1
 }
 
 start() {

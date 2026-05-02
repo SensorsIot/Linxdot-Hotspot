@@ -95,25 +95,57 @@ start_eth() {
     # resolv.conf + route on `bound`.
     udhcpc -b -i eth0 -p /var/run/udhcpc.eth0.pid
 
-    # Wait for the lease to actually arrive before returning. udhcpc -b
-    # forks immediately whether or not the negotiation has finished, so
-    # without this poll S49ntp races the lease — clock-bootstrap then
-    # tries to resolve pool.ntp.org before /etc/resolv.conf is populated
-    # (or before the default route is installed), ntpd exits in <1 s with
-    # no sample, the clock stays in 2017, S60ota's HTTPS manifest fetch
-    # fails cert validation, and the device sits parked on the old
-    # version until next boot. Reproducible race; observed on v1.2.0.
-    echo "S40network: waiting for DHCP lease (default route)"
+    # Self-verify each step. udhcpc -b returns the moment it forks — long
+    # before negotiation finishes — so without explicit verification the
+    # next init script (S49ntp / clock-bootstrap) races the lease. ntpd
+    # then exits in <1 s with no sample, the clock stays in 2017, and
+    # S60ota's HTTPS manifest fetch fails cert validation. Each check
+    # below has its own bounded timeout; on miss we log loudly but exit
+    # 0 (boot must continue for OTA to be able to ship a fix).
+
+    # Step 1: default route present (lease arrived, route installed).
+    echo "S40network: verify default route"
     count=0
     while ! ip route get 1.1.1.1 >/dev/null 2>&1; do
         sleep 1
         count=$((count + 1))
         if [ $count -ge 30 ]; then
-            echo "S40network: no default route after 30 s — continuing without"
+            echo "S40network: WARN no default route after 30s — continuing without"
             return 0
         fi
     done
-    echo "S40network: default route up (took ${count}s)"
+    echo "S40network: default route up after ${count}s"
+
+    # Step 2: /etc/resolv.conf populated (DNS configured).
+    # The udhcpc lease script writes route then resolv.conf; in practice
+    # both arrive together but the order isn't guaranteed across busybox
+    # versions, so check explicitly.
+    count=0
+    while [ ! -s /etc/resolv.conf ]; do
+        sleep 1
+        count=$((count + 1))
+        if [ $count -ge 5 ]; then
+            echo "S40network: WARN /etc/resolv.conf empty after 5s — DNS may fail"
+            break
+        fi
+    done
+
+    # Step 3: actual outbound reachability. ICMP echo to Cloudflare DNS
+    # (1.1.1.1) — no DNS resolution needed, no TLS (clock is still bad
+    # at this point so HTTPS would always fail), and 1.1.1.1 is one of
+    # the most reachable hosts on the public internet. Three attempts
+    # because the first ARP/route exchange after DHCP can drop a packet.
+    echo "S40network: verify connectivity (ping 1.1.1.1)"
+    count=0
+    while ! ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; do
+        count=$((count + 1))
+        if [ $count -ge 3 ]; then
+            echo "S40network: WARN ping 1.1.1.1 failed after 3 attempts — downstream OTA/NTP may fail"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "S40network: connectivity OK after $((count + 1)) attempt(s)"
 }
 
 stop_eth() {
