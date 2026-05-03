@@ -2,7 +2,7 @@
 
 [![Build](https://github.com/SensorsIot/Linxdot-Hotspot/actions/workflows/build.yml/badge.svg)](https://github.com/SensorsIot/Linxdot-Hotspot/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/SensorsIot/Linxdot-Hotspot?include_prereleases)](https://github.com/SensorsIot/Linxdot-Hotspot/releases)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](LICENSE)
 
 ![LoRaWAN](https://img.shields.io/badge/LoRaWAN-Gateway-green)
 ![TTN](https://img.shields.io/badge/TTN-Compatible-blue)
@@ -206,4 +206,12 @@ Run on the device after `ssh root@<device-ip>`:
 
 ## License
 
-MIT
+This project is licensed under the **GNU General Public License v2.0** — see [`LICENSE`](LICENSE) for the full text.
+
+The shipped firmware image also contains third-party components under their own licenses:
+
+- **U-Boot, Linux kernel, BusyBox, SWUpdate** and most Buildroot packages — GPL-2.0 (some LGPL); see `make legal-info` output for the full per-package breakdown
+- **Rockchip TPL/SPL/bl31 blobs** in `board/linxdot/blobs/` — redistributable under Rockchip's vendor terms
+- **Broadcom Wi-Fi/BT firmware** (FSD constraint C-6) — redistributable under Broadcom's vendor terms
+
+When distributing binary images, you must offer the corresponding source per GPL §3.
