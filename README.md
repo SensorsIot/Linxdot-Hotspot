@@ -185,7 +185,9 @@ Run on the device after `ssh root@<device-ip>`:
 | `cat /etc/os-release \| grep VERSION_ID` | Show the running firmware version. |
 | `fw_printenv boot_slot bootcount upgrade_available` | For OTA debugging: A/B slot, consecutive boot attempts (non-zero = trial slot failing health checks), and the trial-boot flag. |
 | `/etc/init.d/S80basicstation restart` | Restart basicstation (after editing `/data/basicstation/region.env`, etc.). |
-| `linxdot-setup` | Re-run the setup wizard. After setup is complete it prints status only; `rm /data/.setup-state` first to actually re-provision. |
+| `linxdot-setup` | Run / re-run the setup wizard. After setup is complete it only prints status. |
+| `rm /data/basicstation/tc_key.txt && /etc/init.d/S80dockercompose restart` | Drop the TTN LNS API key and reconnect basicstation. |
+| `rm -f /data/.setup-state /data/basicstation/tc_key.txt /data/basicstation/region.env && linxdot-setup` | Reset `linxdot-setup` phase B (TTN registration) and re-run the wizard. Only `.setup-state` is strictly required; the others get overwritten by the wizard. |
 
 ## For developers
 
