@@ -982,6 +982,11 @@ fw_setenv upgrade_available 0          # force-commit slot
 ota-check                              # manual update check
 /etc/init.d/S80dockercompose status    # Basics Station + TC_KEY state
 docker logs basicstation               # LNS connection log
+rm /data/basicstation/tc_key.txt && /etc/init.d/S80dockercompose restart   # drop LNS API key
+# Reset linxdot-setup phase B (TTN registration). Only .setup-state is required;
+# tc_key.txt and region.env are overwritten by the wizard but removing them
+# avoids a window where basicstation runs with stale config.
+rm -f /data/.setup-state /data/basicstation/tc_key.txt /data/basicstation/region.env && linxdot-setup
 
 # On the host (via Workbench)
 python3 -c "import serial; s=serial.serial_for_url('rfc2217://192.168.0.87:4003', baudrate=1500000); ..."
