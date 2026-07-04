@@ -37,12 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Rename default 'vscode' user to 'dev' (keeps UID 1000)
-RUN if id -u vscode >/dev/null 2>&1; then \
-        usermod -l ${USERNAME} -d /home/${USERNAME} -m vscode && \
-        groupmod -n ${USERNAME} vscode; \
-    elif ! id -u ${USERNAME} >/dev/null 2>&1; then \
-        useradd -m -s /bin/bash -u 1000 ${USERNAME}; \
-    fi
+RUN usermod -l dev -d /home/dev -m vscode \
+    && groupmod -n dev vscode \
+    && sed -i 's/vscode/dev/g' /etc/sudoers.d/vscode || true \
+    && mv /etc/sudoers.d/vscode /etc/sudoers.d/dev 2>/dev/null || true
 
 # Passwordless sudo for dev user (needed by SSHD feature init script)
 RUN echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} && \
@@ -60,3 +58,9 @@ USER ${USERNAME}
 # Set default working directory for SSH logins
 WORKDIR /workspaces/Linxdot-Hotspot
 RUN echo 'cd /workspaces/Linxdot-Hotspot 2>/dev/null' >> /home/dev/.bashrc
+
+# tmux — terminal multiplexer for SSH sessions
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends tmux \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+USER ${USERNAME}
