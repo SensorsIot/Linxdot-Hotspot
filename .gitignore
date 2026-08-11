@@ -11,7 +11,9 @@ core.*
 board/linxdot/firmware/
 
 # AI assistants and agents
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/commands/
 .claude-data/
 .cursor/
 .github/copilot/
