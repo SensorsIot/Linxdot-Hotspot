@@ -26,11 +26,37 @@ case "${1:-}" in
     *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
 esac
 
+# Config, same sources S60ota and health-probe use. Plain if-blocks, not
+# `[ -r f ] && . f`: under `set -e` that exits 1 when the file is absent.
+if [ -r /etc/default/ota ]; then . /etc/default/ota; fi
+if [ -r /data/ota.conf ];   then . /data/ota.conf;   fi
+
 MANIFEST_URL="${OTA_MANIFEST_URL:-https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json}"
 PUBKEY="${OTA_PUBKEY:-/etc/swupdate/public.pem}"
 
 log() { logger -t ota "$*"; echo "ota: $*"; }
 die() { log "error: $*"; exit 1; }
+
+# version_newer A B -- true when dotted-numeric A is strictly newer than B.
+# String equality alone is not enough: it treats a republished or pulled
+# release as an update and walks the device backwards (1.0.10 also sorts
+# below 1.0.9 lexically). Compares field by field, missing fields read as 0,
+# so 2.1 and 2.1.0 tie. A non-numeric suffix compares by its leading number,
+# so 2.0.0-rc1 ties with 2.0.0 -- deliberately the no-update outcome, which
+# is the safe one.
+version_newer() {
+    _i=1
+    while [ "$_i" -le 4 ]; do
+        _x=$(printf '%s' "$1" | cut -d. -f"$_i" | sed 's/[^0-9].*//')
+        _y=$(printf '%s' "$2" | cut -d. -f"$_i" | sed 's/[^0-9].*//')
+        [ -n "$_x" ] || _x=0
+        [ -n "$_y" ] || _y=0
+        [ "$_x" -gt "$_y" ] && return 0
+        [ "$_x" -lt "$_y" ] && return 1
+        _i=$((_i + 1))
+    done
+    return 1
+}
 
 if [ "$DRY_RUN" -eq 0 ]; then
     UPGRADE_AVAILABLE=$(fw_printenv -n upgrade_available 2>/dev/null || echo "0")
@@ -73,6 +99,18 @@ fi
 if [ "$REMOTE_VERSION" = "$CURRENT_VERSION" ]; then
     log "already up to date"
     exit 0
+fi
+
+# Refuse to walk backwards. Deleting or replacing a published release makes
+# an older manifest "latest"; with a bare inequality test every device would
+# then install it as though it were an update.
+if ! version_newer "$REMOTE_VERSION" "$CURRENT_VERSION"; then
+    if [ "${OTA_ALLOW_DOWNGRADE:-0}" = "1" ]; then
+        log "remote $REMOTE_VERSION older than current $CURRENT_VERSION — installing anyway (OTA_ALLOW_DOWNGRADE=1)"
+    else
+        log "remote $REMOTE_VERSION older than current $CURRENT_VERSION — refusing to downgrade (set OTA_ALLOW_DOWNGRADE=1 in /data/ota.conf to override)"
+        exit 0
+    fi
 fi
 
 SWU=/tmp/update.swu

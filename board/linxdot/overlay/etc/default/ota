@@ -22,3 +22,12 @@
 #
 HEALTH_CHECK=full
 HEALTH_TIMEOUT=300
+
+# OTA_ALLOW_DOWNGRADE
+#   0 (default) ota-check installs a release only when the manifest version
+#     is strictly newer than the running one. A pulled or replaced release
+#     makes an older manifest "latest"; without this guard every device
+#     would install it as though it were an update.
+#   1 install whatever the manifest names, older included. For deliberate
+#     pinning backwards; set it in /data/ota.conf so it survives updates.
+OTA_ALLOW_DOWNGRADE=0

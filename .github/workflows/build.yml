@@ -86,6 +86,7 @@ jobs:
         run: |
           sh tests/test_consistency.sh
           sh tests/test_ota_state_machine.sh
+          sh tests/test_ota_version_compare.sh
 
   # ── Detect if base-affecting files changed ──
   detect-changes:
