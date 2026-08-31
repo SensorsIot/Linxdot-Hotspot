@@ -139,8 +139,28 @@ start_ntpd() {
     return 1
 }
 
+# ntp.conf declares `driftfile /var/lib/ntp/ntp.drift`, but nothing creates
+# that directory. ntpd then cannot persist its measured frequency correction,
+# so it re-learns the oscillator drift from scratch on every boot -- hours of
+# polling each time, on a device with no battery RTC (C-7). Create the
+# directory from whatever path ntp.conf actually names, so an operator who
+# edits the path still gets a working driftfile.
+ensure_driftdir() {
+    drift=$(sed -n 's/^[[:space:]]*driftfile[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' \
+        /etc/ntp.conf 2>/dev/null | head -1)
+    [ -n "$drift" ] || return 0
+    dir=$(dirname "$drift")
+    [ -d "$dir" ] && return 0
+    if mkdir -p "$dir" 2>/dev/null; then
+        logger -t S49ntp "created driftfile directory $dir"
+    else
+        logger -t S49ntp "WARN could not create driftfile directory $dir — drift will not persist"
+    fi
+}
+
 start() {
     clean_stale_overlay_conf
+    ensure_driftdir
     bootstrap_clock_with_recovery
     printf 'Starting %s: ' "$DAEMON"
     if start_ntpd; then echo OK; else echo FAIL; fi
