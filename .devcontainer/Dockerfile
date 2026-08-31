@@ -66,7 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends tmux \
 USER ${USERNAME}
 
 # Per-user npm prefix on PATH so claude (installed into ~/.npm-global/bin by
-# postCreate) and the superclaude alias resolve. Set as image ENV, not appended
+# postCreate) resolves. Set as image ENV, not appended
 # to .bashrc: Debian's .bashrc returns early for non-interactive shells, so a
 # PATH export there is invisible to `ssh <host> claude ...`, cron and scripts.
 # ENV applies to every shell, interactive or not.
@@ -83,7 +83,7 @@ RUN printf '%s\n' \
     '# --- Persistent claude session (auto-attach tmux on interactive SSH) ---' \
     'if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && [ "$TERM_PROGRAM" != "vscode" ] && [ ! -f "$HOME/.no-tmux" ] && command -v tmux >/dev/null 2>&1; then' \
     '    case "$-" in' \
-    '        *i*) exec tmux new-session -A -s main -c /workspaces/Linxdot-Hotspot "claude --dangerously-skip-permissions; exec bash" ;;' \
+    '        *i*) exec tmux new-session -A -s main -c /workspaces/Linxdot-Hotspot "claude; exec bash" ;;' \
     '    esac' \
     'fi' \
     >> /home/dev/.bashrc
