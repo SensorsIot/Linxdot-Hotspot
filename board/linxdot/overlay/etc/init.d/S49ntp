@@ -15,7 +15,13 @@
 
 DAEMON=ntpd
 PIDFILE=/var/run/$DAEMON.pid
-NTPD_ARGS="-g"
+# -4: bind IPv4 only. ntpd enumerates eth0's IPv6 link-local while it is
+# still tentative (DAD in flight, dad_transmits=1), so bind() returns
+# EADDRNOTAVAIL -- and ntpd 4.2.8p18 segfaults on that error path instead
+# of skipping the interface, leaving the clock undisciplined. The device
+# has no IPv6 default route (only fe80::/64 and multicast) and reaches the
+# pool over IPv4, so nothing is lost by not binding v6 at all.
+NTPD_ARGS="-4 -g"
 
 # Allow operator override (matches the Buildroot stock pattern).
 [ -r /etc/default/$DAEMON ] && . /etc/default/$DAEMON
@@ -100,14 +106,44 @@ bootstrap_clock_with_recovery() {
     return 0
 }
 
+# start-stop-daemon returns 0 as soon as the parent forks, so its exit
+# status is not proof ntpd survived: the SIGSEGV above happens in the child
+# a moment later, and the old code printed OK/FAIL from that status and
+# moved on either way. Check the pid is still alive, and retry -- a lost
+# race against DAD will usually win on the next attempt.
+#
+# No bounded-reboot wrapper here, deliberately. Unlike S40network/S49ntp's
+# clock step, a dead ntpd does not make the next boot step 100% fail:
+# clock-bootstrap has already stepped the clock and ota-check re-steps it,
+# so the device stays functional and OTA-reachable. Rebooting over an
+# upstream crash could loop forever for no gain. Log loudly and continue.
+start_ntpd() {
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        # shellcheck disable=SC2086 # we need word splitting on NTPD_ARGS
+        start-stop-daemon -S -q -p "$PIDFILE" -x "/usr/sbin/$DAEMON" \
+            -- $NTPD_ARGS -p "$PIDFILE"
+        sleep 2
+        pid=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            logger -t S49ntp "ntpd running (pid $pid, attempt ${attempt}/3)"
+            return 0
+        fi
+        logger -t S49ntp "ntpd died on attempt ${attempt}/3 (check syslog for bind/signal errors)"
+        rm -f "$PIDFILE"
+        attempt=$((attempt + 1))
+        [ "$attempt" -le 3 ] && sleep 3
+    done
+
+    logger -t S49ntp "FAIL ntpd would not stay up — clock is set but undisciplined; it will free-run between boots (no RTC, C-7)"
+    return 1
+}
+
 start() {
     clean_stale_overlay_conf
     bootstrap_clock_with_recovery
     printf 'Starting %s: ' "$DAEMON"
-    # shellcheck disable=SC2086 # we need word splitting on NTPD_ARGS
-    start-stop-daemon -S -q -p "$PIDFILE" -x "/usr/sbin/$DAEMON" \
-        -- $NTPD_ARGS -p "$PIDFILE"
-    if [ $? -eq 0 ]; then echo OK; else echo FAIL; fi
+    if start_ntpd; then echo OK; else echo FAIL; fi
 }
 
 stop() {
