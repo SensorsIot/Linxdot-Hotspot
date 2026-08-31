@@ -1,18 +1,29 @@
 #!/bin/sh
 # S80basicstation — start the Basics Station container via docker-compose.
 #
-# Minimal version: wait for dockerd, load TC_KEY (if configured), `compose up`.
-# Chip bring-up is owned by S70sx1302 on the host (not by reset.sh inside the
-# container); the container just runs basicstation.
+# Wait for dockerd, load TC_KEY (if configured), `compose up`, then verify
+# the container is actually running.
+#
+# Chip bring-up is owned by the container's own entrypoint in
+# /etc/docker-compose.yml (RESET_GPIO=0 keeps the image's templated
+# reset.sh a no-op so it doesn't fire a second pulse on top). There is no
+# host-side S70sx1302 — the DT marks vcc3v3-lora regulator-always-on, so
+# the rail is live from kernel boot. See FSD § "No host-side SX1302 init".
 #
 # If /data/basicstation/tc_key.txt is absent or empty the container still
-# starts but won't be able to reach TTN — that's fine, the operator can drop
-# in the key and `restart` later.
+# starts but won't be able to reach TTN — that's a configuration gap, not a
+# boot fault, so it is logged and does NOT trigger recovery: the operator
+# can drop in the key and `restart` later.
+#
+# Bullet-proof boot: this is the last step in the chain that makes the
+# device a gateway, so `compose up` returning 0 is not enough — the
+# container can exit immediately. Verify it is up, and recover if not.
 
 CONF=/etc/docker-compose.yml
 PROG=/usr/bin/docker-compose
 LOG=/var/log/docker-compose.log
 TC_KEY_FILE=/data/basicstation/tc_key.txt
+CONTAINER=basicstation
 
 [ -x "$PROG" ] || exit 0
 
@@ -30,7 +41,7 @@ load_tc_key() {
 }
 
 wait_for_docker() {
-    for i in $(seq 1 60); do
+    for _ in $(seq 1 60); do
         [ -S /var/run/docker.sock ] && docker info >/dev/null 2>&1 && return 0
         sleep 1
     done
@@ -38,20 +49,84 @@ wait_for_docker() {
     return 1
 }
 
+# `compose up -d` exits 0 once the container is created; it does not prove
+# the process inside survived. Poll the container's running state so a
+# container that starts and immediately dies is caught here rather than
+# silently leaving the device off the network.
+container_running() {
+    [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]
+}
+
+wait_for_container() {
+    for _ in $(seq 1 30); do
+        container_running && return 0
+        sleep 2
+    done
+    return 1
+}
+
+start_station() {
+    wait_for_docker || return 1
+
+    export COMPOSE_HTTP_TIMEOUT=300
+    say "docker-compose pull"
+    $PROG -f "$CONF" pull >> "$LOG" 2>&1 || say "WARN pull failed (continuing with local image)"
+    say "docker-compose up -d"
+    $PROG -f "$CONF" up -d >> "$LOG" 2>&1
+
+    if wait_for_container; then
+        say "container $CONTAINER running"
+        return 0
+    fi
+
+    say "FAIL container $CONTAINER not running after up -d"
+    docker logs --tail 5 "$CONTAINER" 2>&1 | while read -r line; do say "station: $line"; done
+    return 1
+}
+
+# Bounded-reboot recovery wrapper. Same pattern as S49ntp/S75dockerd.
+# Trial-boot safety: don't reboot during upgrade_available=1; bootloader
+# rollback already owns recovery in that state. After exhausting reboots:
+# log loudly, return, let init continue so SSH stays reachable and the OTA
+# layer can still deliver a fix.
+start_station_with_recovery() {
+    COUNTER=/data/.s80-reboots
+    REBOOT_MAX=3
+
+    if start_station; then
+        rm -f "$COUNTER"
+        return 0
+    fi
+
+    if [ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ]; then
+        say "trial boot — leaving rollback to bootloader"
+        return 0
+    fi
+
+    count=0
+    [ -f "$COUNTER" ] && count=$(cat "$COUNTER" 2>/dev/null || echo 0)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+
+    if [ "$count" -ge "$REBOOT_MAX" ]; then
+        say "FAIL after $REBOOT_MAX recovery reboots — leaving for SSH/OTA diagnosis"
+        return 0
+    fi
+
+    count=$((count + 1))
+    echo "$count" > "$COUNTER"
+    sync
+    say "rebooting to recover Basics Station ($count/$REBOOT_MAX)"
+    sleep 5
+    reboot
+    return 0
+}
+
 case "$1" in
     start)
         if ! load_tc_key; then
             say "TC_KEY not configured at $TC_KEY_FILE — basicstation will start but won't reach TTN"
         fi
-
-        say "waiting for Docker"
-        wait_for_docker || exit 0
-
-        export COMPOSE_HTTP_TIMEOUT=300
-        say "docker-compose pull"
-        $PROG -f "$CONF" pull >> "$LOG" 2>&1 || say "WARN pull failed (continuing with local image)"
-        say "docker-compose up -d"
-        $PROG -f "$CONF" up -d >> "$LOG" 2>&1
+        start_station_with_recovery
         ;;
     stop)
         say "stopping container"

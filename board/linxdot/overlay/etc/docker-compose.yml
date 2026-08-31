@@ -15,6 +15,16 @@ services:
       TC_KEY: "${TC_KEY}"
     volumes:
       - /data/basicstation:/config
+    # Cap container logs. Without this the json-file driver is unbounded:
+    # a basicstation crash loop under `restart: always` wrote a 261 MiB
+    # log that filled /data (487 MiB), which then stopped dockerd from
+    # initialising its overlay2 graphdriver on the next boot — no daemon,
+    # no container, no gateway. 3 x 10 MiB caps the worst case at 30 MiB.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Bring up the SX1302 from a known clean state on every container
     # start. Datasheet sequence: hold RESET asserted, then bring rails
     # up, settle, then release RESET. RESET_GPIO=0 above keeps the

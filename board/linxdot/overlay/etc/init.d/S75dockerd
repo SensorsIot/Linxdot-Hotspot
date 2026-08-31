@@ -1,24 +1,133 @@
 #!/bin/sh
 # S75dockerd — start Docker daemon with data on /data/docker.
 #
-# Numbered S75 (after S70sx1302, before S80basicstation) so it slots
-# cleanly between chip bring-up and the container that uses it.
+# Numbered S75 (before S80basicstation) so the engine is up before the
+# container that uses it. Chip bring-up is not a host-side step: the
+# basicstation container's entrypoint owns the SX1302 power cycle.
 # /data/docker is created on first boot by S00datapart.
+#
+# Bullet-proof boot: dockerd is a hard prerequisite for S80basicstation —
+# without it there is no gateway at all — so this script verifies the
+# daemon actually answers before returning, and recovers when it does not.
+# Two failure modes are handled explicitly:
+#
+#   1. /data full. dockerd cannot create its overlay2 probe directory and
+#      dies with the misleading "driver not supported: overlay2". Rebooting
+#      does not free space, so reclaim it first (unbounded container logs
+#      are the known culprit) — see reclaim_space().
+#   2. Anything else. Bounded-reboot wrapper, same pattern as S49ntp.
 
 PROG=/usr/bin/dockerd
 LOG=/var/log/dockerd.log
+DATA_ROOT=/data/docker
+
+# Free space below which dockerd is at risk (KiB). overlay2 needs room for
+# the image layers the container unpacks, not just the probe dir.
+MIN_FREE_KB=65536
+
+say() {
+    echo "S75dockerd: $*"
+    logger -t S75dockerd "$*" 2>/dev/null || true
+}
 
 [ -x "$PROG" ] || exit 0
+
+free_kb() {
+    df -k /data 2>/dev/null | tail -1 | awk '{print $4}'
+}
+
+# Reclaim space when /data is too full for dockerd to initialise. Container
+# json logs are truncated in place rather than deleted: Docker holds them
+# open, so unlinking would leak the blocks until the daemon restarts.
+reclaim_space() {
+    avail=$(free_kb)
+    case "$avail" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$avail" -ge "$MIN_FREE_KB" ] && return 0
+
+    say "only ${avail}KiB free on /data (need ${MIN_FREE_KB}KiB) — reclaiming"
+    for f in "$DATA_ROOT"/containers/*/*-json.log; do
+        [ -f "$f" ] || continue
+        sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+        : > "$f" 2>/dev/null && say "truncated $(basename "$f") (${sz} bytes)"
+    done
+
+    avail=$(free_kb)
+    say "after reclaim: ${avail}KiB free on /data"
+}
+
+# Poll until the daemon answers, up to ~60s. Backgrounding dockerd and
+# returning success is not proof it started — the ENOSPC failure above
+# exits ~3s in, long after this script would have reported OK.
+wait_for_dockerd() {
+    for _ in $(seq 1 60); do
+        if [ -S /var/run/docker.sock ] && docker info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+start_dockerd() {
+    mkdir -p "$DATA_ROOT" /var/run/docker
+    reclaim_space
+    $PROG --data-root "$DATA_ROOT" \
+          -H unix:///var/run/docker.sock \
+          -G root \
+          --storage-driver overlay2 \
+          > "$LOG" 2>&1 &
+
+    if wait_for_dockerd; then
+        say "Docker engine up"
+        return 0
+    fi
+
+    say "FAIL dockerd did not answer within 60s — S80basicstation would 100% fail"
+    tail -3 "$LOG" 2>/dev/null | while read -r line; do say "dockerd: $line"; done
+    return 1
+}
+
+# Bounded-reboot recovery wrapper. Same pattern as S49ntp: if the daemon
+# will not come up, reboot (counter on /data, capped at REBOOT_MAX).
+# Trial-boot safety: don't reboot during upgrade_available=1; bootloader
+# rollback is already running. After exhausting reboots: log loudly,
+# return, let init continue so SSH stays reachable for diagnosis.
+start_dockerd_with_recovery() {
+    COUNTER=/data/.s75-reboots
+    REBOOT_MAX=3
+
+    if start_dockerd; then
+        rm -f "$COUNTER"
+        return 0
+    fi
+
+    if [ "$(fw_printenv -n upgrade_available 2>/dev/null)" = "1" ]; then
+        say "trial boot — leaving rollback to bootloader"
+        return 0
+    fi
+
+    count=0
+    [ -f "$COUNTER" ] && count=$(cat "$COUNTER" 2>/dev/null || echo 0)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+
+    if [ "$count" -ge "$REBOOT_MAX" ]; then
+        say "FAIL after $REBOOT_MAX recovery reboots — leaving for SSH/OTA diagnosis"
+        return 0
+    fi
+
+    count=$((count + 1))
+    echo "$count" > "$COUNTER"
+    sync
+    say "rebooting to recover Docker engine ($count/$REBOOT_MAX)"
+    sleep 5
+    reboot
+    return 0
+}
 
 case "$1" in
     start)
         echo "S75dockerd: starting Docker engine"
-        mkdir -p /data/docker /var/run/docker
-        $PROG --data-root /data/docker \
-              -H unix:///var/run/docker.sock \
-              -G root \
-              --storage-driver overlay2 \
-              > "$LOG" 2>&1 &
+        start_dockerd_with_recovery
         ;;
     stop)
         echo "S75dockerd: stopping Docker engine"
