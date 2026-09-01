@@ -261,14 +261,14 @@ See `Docs/54-00177.pdf` for the audio jack datasheet and pinout.
 
 A standard FTDI USB-to-serial adapter with a 3.5mm TRRS cable can be used for console access. Use `picocom -b 1500000 /dev/ttyUSB0` or equivalent.
 
-**Remote access via Universal-Embedded-Workbench.** The LD1001's serial console is exposed over RFC2217 on the Workbench Pi at `192.168.0.87` (SLOT3, TCP port 4003). Any RFC2217-aware client works — from a dev container:
+**Remote access via Universal-Embedded-Workbench.** The LD1001's serial console is exposed over RFC2217 on the Workbench Pi at `192.168.0.168` (SLOT3, TCP port 4003). Any RFC2217-aware client works — from a dev container:
 
 ```python
 import serial
-s = serial.serial_for_url('rfc2217://192.168.0.87:4003', baudrate=1500000, timeout=0.3)
+s = serial.serial_for_url('rfc2217://192.168.0.168:4003', baudrate=1500000, timeout=0.3)
 ```
 
-The slot map is queryable via `curl http://192.168.0.87:8080/api/devices`. This is the practical way to drive the device from CI/dev containers without physical cable access.
+The slot map is queryable via `curl http://192.168.0.168:8080/api/devices`. This is the practical way to drive the device from CI/dev containers without physical cable access.
 
 **Vendor login:** `root` / `linxdot`.
 

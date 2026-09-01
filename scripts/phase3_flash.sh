@@ -12,9 +12,9 @@
 set -eu
 
 IMG="${1:-${IMG:-./linxdot-basics-station.img}}"
-PI_HOST="${PI_HOST:-pi@192.168.0.87}"
+PI_HOST="${PI_HOST:-pi@192.168.0.168}"
 REMOTE_IMG="${REMOTE_IMG:-/tmp/linxdot-basics-station.img}"
-SER_HOST="${SER_HOST:-192.168.0.87}"
+SER_HOST="${SER_HOST:-192.168.0.168}"
 SER_PORT="${SER_PORT:-4003}"
 SER_BAUD="${SER_BAUD:-1500000}"
 

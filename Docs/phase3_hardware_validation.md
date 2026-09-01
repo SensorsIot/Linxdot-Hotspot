@@ -19,7 +19,7 @@ Every test below carries a **pass criterion**. If any fails, stop and escalate �
 
 - LD1001 dedicated to testing (not deployed). A successful run wipes `/data` — back up `tc_key.txt` and `docker-compose.yml` first if the device was in service.
 - Serial console access at **1,500,000 baud, 8N1** (`board/linxdot/blobs/` DTB declares `stdout-path = "serial2:1500000n8"`; console must stay at 1.5 Mbaud for Phase 3, per FSD §4.3 C-2).
-- Either: a host with direct USB-C cable access to the LD1001 download port, or the Workbench Pi (`192.168.0.87` per memory) with a routed USB cable per FSD §7.3 Option B.
+- Either: a host with direct USB-C cable access to the LD1001 download port, or the Workbench Pi (`192.168.0.168` per memory) with a routed USB cable per FSD §7.3 Option B.
 - `rkdeveloptool` built and installed on the flashing host. Verify with `rkdeveloptool -v`.
 - Clone of `rockchip-linux/rkbin` checked out on the flashing host, and a MiniAll loader packed from its x86 `boot_merger` tool. `rkdeveloptool db` expects a Rockchip-header-wrapped loader, **not** the raw `rk356x_usbplug_v1.17.bin` (which it rejects with `Opening loader failed`).
   ```

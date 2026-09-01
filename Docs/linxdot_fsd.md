@@ -132,7 +132,7 @@ Target hardware is fully documented in `Docs/Hardware.md` (reference manual). Su
 - **Storage:** 28.9 GiB eMMC (plenty of headroom — A/B layout uses ~1.6 GiB).
 - **LoRa:** Semtech SX1302 concentrator on SPI (`/dev/spidev0.0`).
 - **Network:** Gigabit Ethernet (Realtek RTL8211F). WiFi + BT present but not used by default.
-- **Serial console:** UART2 @ **1,500,000 baud** on 3.5 mm TRRS jack. Exposed remotely via the Workbench Pi at `rfc2217://192.168.0.87:4003`.
+- **Serial console:** UART2 @ **1,500,000 baud** on 3.5 mm TRRS jack. Exposed remotely via the Workbench Pi at `rfc2217://192.168.0.168:4003`.
 - **USB:** USB-C behind the case, wired to the RK3566 USB2.0 controller — enables Rockchip download mode for `rkdeveloptool` flashing. Accessible from serial via `rockusb` / `download` commands without any physical button.
 - **BootROM:** confirmed **non-secure** (see `Docs/Hardware.md § BootROM secure-mode status`).
 
@@ -298,7 +298,7 @@ The SX1302 datasheet does not give explicit timing numbers, but standard practic
 #### Remote operation
 - **FR-5.1** [Must]: The system shall run Dropbear SSH on port 22 with `root` / `linxdot` credentials (operator is expected to change the password on first access).
 - **FR-5.2** [Should]: Dropbear host keys shall persist across reboots via the `/etc` overlay on `/data`.
-- **FR-5.3** [Should]: The physical serial console shall be accessible remotely via the Workbench Pi at `rfc2217://192.168.0.87:4003` at 1.5 Mbaud.
+- **FR-5.3** [Should]: The physical serial console shall be accessible remotely via the Workbench Pi at `rfc2217://192.168.0.168:4003` at 1.5 Mbaud.
 
 #### Diagnostics
 - **FR-6.1** [Should]: The system shall expose Docker logs via `docker logs basicstation` for operator diagnosis of TTN connectivity.
@@ -363,7 +363,7 @@ The SX1302 datasheet does not give explicit timing numbers, but standard practic
 | OTA manifest poll | Outbound | HTTPS GET | `https://github.com/SensorsIot/Linxdot-Hotspot/releases/latest/download/manifest.json` |
 | OTA bundle download | Outbound | HTTPS GET | URL from manifest `url` field |
 | SSH | Inbound | SSH (Dropbear) | TCP 22 |
-| Serial console | Bidirectional | UART (8N1, 1.5 Mbaud) | ttyS2 @ 3.5 mm TRRS jack, also `rfc2217://192.168.0.87:4003` via Workbench |
+| Serial console | Bidirectional | UART (8N1, 1.5 Mbaud) | ttyS2 @ 3.5 mm TRRS jack, also `rfc2217://192.168.0.168:4003` via Workbench |
 | Device provisioning (flashing) | Inbound | Rockchip USB (rkusb) | USB-C on device, Loader or Maskrom mode |
 
 ### 7.2 Internal Interfaces
@@ -989,9 +989,9 @@ rm /data/basicstation/tc_key.txt && /etc/init.d/S80dockercompose restart   # dro
 rm -f /data/.setup-state /data/basicstation/tc_key.txt /data/basicstation/region.env && linxdot-setup
 
 # On the host (via Workbench)
-python3 -c "import serial; s=serial.serial_for_url('rfc2217://192.168.0.87:4003', baudrate=1500000); ..."
-curl http://192.168.0.87:8080/api/devices      # workbench slot map
-ssh pi@192.168.0.87 'sudo rkdeveloptool ld'    # rkdeveloptool status (needs USB routed)
+python3 -c "import serial; s=serial.serial_for_url('rfc2217://192.168.0.168:4003', baudrate=1500000); ..."
+curl http://192.168.0.168:8080/api/devices      # workbench slot map
+ssh pi@192.168.0.168 'sudo rkdeveloptool ld'    # rkdeveloptool status (needs USB routed)
 ```
 
 ### 13.4 Repository layout

@@ -170,7 +170,7 @@ For debugging without network, connect via the 3.5 mm audio jack:
 picocom -b 1500000 /dev/ttyUSB0
 ```
 
-Baud rate is **1,500,000** (1.5 Mbaud), 8N1. Console is also available remotely via the Workbench Pi at `rfc2217://192.168.0.87:4003`.
+Baud rate is **1,500,000** (1.5 Mbaud), 8N1. Console is also available remotely via the Workbench Pi at `rfc2217://192.168.0.168:4003`.
 
 ---
 
