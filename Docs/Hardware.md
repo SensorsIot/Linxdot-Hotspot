@@ -2,11 +2,11 @@
 
 ## Overview
 
-The Linxdot LD1001 is a LoRa hotspot built around the Rockchip RK3566 SoC. The board is mounted in a metal enclosure with a heatsink on the processor. Originally designed for the Helium network, it now runs a configurable Semtech UDP packet forwarder for TTN, ChirpStack, or any compatible LoRa network server.
+The Linxdot LD1001 is a LoRa hotspot built around the Rockchip RK3566 SoC. The board is mounted in a plastic enclosure with a heatsink on the processor. Originally designed for the Helium network, it now runs a configurable Semtech UDP packet forwarder for TTN, ChirpStack, or any compatible LoRa network server.
 
 - **Device tree model:** `Linxdot RK3566 R01`
 - **Product name:** Linxdot LD1001
-- **Form factor:** Metal enclosure (~100x100mm) with passive heatsink
+- **Form factor:** ABS plastic enclosure (~190x190x50mm) with passive heatsink
 
 ## Gateway Configuration
 
